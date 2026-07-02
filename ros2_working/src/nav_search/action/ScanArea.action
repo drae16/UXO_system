@@ -1,0 +1,14 @@
+# Goal
+float32 start_angle
+float32 end_angle
+int32   num_steps
+float32 min_confidence
+---
+# Result
+bool    found
+float32 x_base
+float32 y_base
+---
+# Feedback
+float32 progress       # 0..100
+float32 current_angle

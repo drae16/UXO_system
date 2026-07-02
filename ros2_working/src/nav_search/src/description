@@ -1,0 +1,6 @@
+original (arm using nav2)
+rev2: (arm using vel_cmd)
+rev3: (arm using nav2 working)
+rev4: arm using nav2 and cmd with arm tracking move it (trackes whole time)
+rev5 arm using nav2 an cmd with arm tracking servo
+rev6: arm using nav2 and cmd with arm tracking move it (trackes at beginning and end)

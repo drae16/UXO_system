@@ -1,0 +1,9 @@
+# request to start tracking
+bool enable
+geometry_msgs/PointStamped target
+
+---
+
+#response
+bool accepted
+string message

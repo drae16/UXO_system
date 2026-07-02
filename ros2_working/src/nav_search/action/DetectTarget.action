@@ -1,0 +1,11 @@
+# Goal
+float32 min_confidence
+---
+# Result
+bool found
+float32 x_base
+float32 y_base
+float32 confidence
+---
+# Feedback
+float32 progress
