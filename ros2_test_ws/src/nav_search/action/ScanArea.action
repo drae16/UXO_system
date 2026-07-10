@@ -1,0 +1,18 @@
+#scan area
+# Goal
+float32 start_angle
+float32 end_angle
+int32   num_steps
+float32 min_confidence
+---
+# Result
+bool    found
+bool    known
+float32 x_map
+float32 y_map
+float32 distance
+float32 axis
+---
+# Feedback
+float32 progress       # 0..100
+float32 current_angle

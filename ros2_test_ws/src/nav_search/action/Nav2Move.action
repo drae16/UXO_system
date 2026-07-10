@@ -1,0 +1,14 @@
+# Goal
+float32 x_map
+float32 y_map
+float32 axis
+---
+# Result
+bool known
+float32 axis
+float32 x_map_update
+float32 y_map_update
+float32 distance
+---
+# Feedback
+float32 progress

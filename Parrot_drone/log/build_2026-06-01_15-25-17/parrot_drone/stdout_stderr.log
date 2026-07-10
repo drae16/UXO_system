@@ -1,0 +1,28 @@
+running egg_info
+writing ../build/parrot_drone/parrot_drone.egg-info/PKG-INFO
+writing dependency_links to ../build/parrot_drone/parrot_drone.egg-info/dependency_links.txt
+writing entry points to ../build/parrot_drone/parrot_drone.egg-info/entry_points.txt
+writing requirements to ../build/parrot_drone/parrot_drone.egg-info/requires.txt
+writing top-level names to ../build/parrot_drone/parrot_drone.egg-info/top_level.txt
+reading manifest file '../build/parrot_drone/parrot_drone.egg-info/SOURCES.txt'
+writing manifest file '../build/parrot_drone/parrot_drone.egg-info/SOURCES.txt'
+running build
+running build_py
+copying parrot_drone/drone_setup.py -> /home/drl/poi_dog/Parrot_drone/build/parrot_drone/build/lib/parrot_drone
+copying parrot_drone/fly_drone.py -> /home/drl/poi_dog/Parrot_drone/build/parrot_drone/build/lib/parrot_drone
+copying parrot_drone/__init__.py -> /home/drl/poi_dog/Parrot_drone/build/parrot_drone/build/lib/parrot_drone
+running install
+running install_lib
+copying /home/drl/poi_dog/Parrot_drone/build/parrot_drone/build/lib/parrot_drone/drone_setup.py -> /home/drl/poi_dog/Parrot_drone/install/parrot_drone/lib/python3.10/site-packages/parrot_drone
+copying /home/drl/poi_dog/Parrot_drone/build/parrot_drone/build/lib/parrot_drone/fly_drone.py -> /home/drl/poi_dog/Parrot_drone/install/parrot_drone/lib/python3.10/site-packages/parrot_drone
+byte-compiling /home/drl/poi_dog/Parrot_drone/install/parrot_drone/lib/python3.10/site-packages/parrot_drone/drone_setup.py to drone_setup.cpython-310.pyc
+byte-compiling /home/drl/poi_dog/Parrot_drone/install/parrot_drone/lib/python3.10/site-packages/parrot_drone/fly_drone.py to fly_drone.cpython-310.pyc
+running install_data
+copying resource/parrot_drone -> /home/drl/poi_dog/Parrot_drone/install/parrot_drone/share/ament_index/resource_index/packages
+copying package.xml -> /home/drl/poi_dog/Parrot_drone/install/parrot_drone/share/parrot_drone
+running install_egg_info
+removing '/home/drl/poi_dog/Parrot_drone/install/parrot_drone/lib/python3.10/site-packages/parrot_drone-0.0.0-py3.10.egg-info' (and everything under it)
+Copying ../build/parrot_drone/parrot_drone.egg-info to /home/drl/poi_dog/Parrot_drone/install/parrot_drone/lib/python3.10/site-packages/parrot_drone-0.0.0-py3.10.egg-info
+running install_scripts
+Installing fly_drone script to /home/drl/poi_dog/Parrot_drone/install/parrot_drone/lib/parrot_drone
+writing list of installed files to '/home/drl/poi_dog/Parrot_drone/build/parrot_drone/install.log'

@@ -1,0 +1,25 @@
+moveit_setup_assistant_config:
+  urdf:
+    package: d1_550_description
+    relative_path: urdf/d1_550_description.urdf
+  srdf:
+    relative_path: config/d1_550_description.srdf
+  package_settings:
+    author_name: Dante_rael
+    author_email: ""
+    generated_timestamp: 1771280866
+  control_xacro:
+    command:
+      - position
+    state:
+      - position
+      - velocity
+  modified_urdf:
+    xacros:
+      - control_xacro
+  control_xacro:
+    command:
+      - position
+    state:
+      - position
+      - velocity

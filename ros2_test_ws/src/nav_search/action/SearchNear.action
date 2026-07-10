@@ -1,0 +1,13 @@
+#goal
+float32 x_map
+float32 y_map
+
+---
+#Results
+float32 x_map_update
+float32 y_map_update
+float32 distance
+bool known
+---
+#Feedback
+float32 progress

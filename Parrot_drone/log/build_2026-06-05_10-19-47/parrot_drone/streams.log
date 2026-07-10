@@ -1,0 +1,28 @@
+[0.496s] Invoking command in '/home/drl/poi_dog/Parrot_drone/src': PS1=(.poi) \[\e]0;\u@\h: \w\a\]${debian_chroot:+($debian_chroot)}\[\033[01;32m\]\u@\h\[\033[00m\]:\[\033[01;34m\]\w\[\033[00m\]\$ PYTHONPATH=/home/drl/poi_dog/Parrot_drone/build/parrot_drone/prefix_override:/home/drl/poi_dog/.poi/lib/python3.10/site-packages/colcon_core/task/python/colcon_distutils_commands:/home/drl/poi_dog/Parrot_drone/install/parrot_drone/lib/python3.10/site-packages:${PYTHONPATH} VIRTUAL_ENV_PROMPT=(.poi) /home/drl/poi_dog/.poi/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py egg_info --egg-base ../build/parrot_drone build --build-base /home/drl/poi_dog/Parrot_drone/build/parrot_drone/build install --record /home/drl/poi_dog/Parrot_drone/build/parrot_drone/install.log --single-version-externally-managed install_data
+[0.669s] running egg_info
+[0.679s] writing ../build/parrot_drone/parrot_drone.egg-info/PKG-INFO
+[0.679s] writing dependency_links to ../build/parrot_drone/parrot_drone.egg-info/dependency_links.txt
+[0.679s] writing entry points to ../build/parrot_drone/parrot_drone.egg-info/entry_points.txt
+[0.680s] writing requirements to ../build/parrot_drone/parrot_drone.egg-info/requires.txt
+[0.680s] writing top-level names to ../build/parrot_drone/parrot_drone.egg-info/top_level.txt
+[1.514s] reading manifest file '../build/parrot_drone/parrot_drone.egg-info/SOURCES.txt'
+[1.516s] writing manifest file '../build/parrot_drone/parrot_drone.egg-info/SOURCES.txt'
+[1.516s] running build
+[1.516s] running build_py
+[1.517s] copying parrot_drone/drone_setup.py -> /home/drl/poi_dog/Parrot_drone/build/parrot_drone/build/lib/parrot_drone
+[1.517s] copying parrot_drone/fly_drone.py -> /home/drl/poi_dog/Parrot_drone/build/parrot_drone/build/lib/parrot_drone
+[1.517s] copying parrot_drone/__init__.py -> /home/drl/poi_dog/Parrot_drone/build/parrot_drone/build/lib/parrot_drone
+[1.517s] running install
+[1.520s] running install_lib
+[1.530s] copying /home/drl/poi_dog/Parrot_drone/build/parrot_drone/build/lib/parrot_drone/drone_setup.py -> /home/drl/poi_dog/Parrot_drone/install/parrot_drone/lib/python3.10/site-packages/parrot_drone
+[1.530s] byte-compiling /home/drl/poi_dog/Parrot_drone/install/parrot_drone/lib/python3.10/site-packages/parrot_drone/drone_setup.py to drone_setup.cpython-310.pyc
+[1.533s] running install_data
+[1.533s] copying resource/parrot_drone -> /home/drl/poi_dog/Parrot_drone/install/parrot_drone/share/ament_index/resource_index/packages
+[1.533s] copying package.xml -> /home/drl/poi_dog/Parrot_drone/install/parrot_drone/share/parrot_drone
+[1.533s] running install_egg_info
+[1.543s] removing '/home/drl/poi_dog/Parrot_drone/install/parrot_drone/lib/python3.10/site-packages/parrot_drone-0.0.0-py3.10.egg-info' (and everything under it)
+[1.543s] Copying ../build/parrot_drone/parrot_drone.egg-info to /home/drl/poi_dog/Parrot_drone/install/parrot_drone/lib/python3.10/site-packages/parrot_drone-0.0.0-py3.10.egg-info
+[1.543s] running install_scripts
+[1.633s] Installing fly_drone script to /home/drl/poi_dog/Parrot_drone/install/parrot_drone/lib/parrot_drone
+[1.634s] writing list of installed files to '/home/drl/poi_dog/Parrot_drone/build/parrot_drone/install.log'
+[1.653s] Invoked command in '/home/drl/poi_dog/Parrot_drone/src' returned '0': PS1=(.poi) \[\e]0;\u@\h: \w\a\]${debian_chroot:+($debian_chroot)}\[\033[01;32m\]\u@\h\[\033[00m\]:\[\033[01;34m\]\w\[\033[00m\]\$ PYTHONPATH=/home/drl/poi_dog/Parrot_drone/build/parrot_drone/prefix_override:/home/drl/poi_dog/.poi/lib/python3.10/site-packages/colcon_core/task/python/colcon_distutils_commands:/home/drl/poi_dog/Parrot_drone/install/parrot_drone/lib/python3.10/site-packages:${PYTHONPATH} VIRTUAL_ENV_PROMPT=(.poi) /home/drl/poi_dog/.poi/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py egg_info --egg-base ../build/parrot_drone build --build-base /home/drl/poi_dog/Parrot_drone/build/parrot_drone/build install --record /home/drl/poi_dog/Parrot_drone/build/parrot_drone/install.log --single-version-externally-managed install_data

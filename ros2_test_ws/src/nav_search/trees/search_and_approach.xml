@@ -1,0 +1,103 @@
+<root BTCPP_format="4">
+  <BehaviorTree ID="SearchAndApproachTarget">
+
+    <Fallback name="main_root">
+
+      <Sequence name="already_at_final_pose">
+        <ArmScan name="initial scan"
+          action_name="scan_area"
+          start_angle="{scan_start_angle}"
+          end_angle="{scan_end_angle}"
+          num_steps="{scan_steps}"
+          min_confidence="{min_confidence}"
+          found="{found}"
+          known="{known}"
+          x_map="{target_x_map}"
+          y_map="{target_y_map}"
+          distance="{target_distance}"
+          axis="{target_axis}" />
+        <InitialFound found="{found}" />
+        <AtFinalPose distance="{target_distance}" />
+      </Sequence>
+
+
+
+      <ReactiveSequence name="acquire_and_approach">
+
+        <Fallback name="ensure_initial_found">
+          <InitialFound found="{found}" />
+          <ArmScan name="second look"
+            action_name="scan_area"
+            start_angle="{scan_start_angle}"
+            end_angle="{scan_end_angle}"
+            num_steps="{scan_steps}"
+            min_confidence="{min_confidence}"
+            found="{found}"
+            known="{known}"
+            x_map="{target_x_map}"
+            y_map="{target_y_map}"
+            distance="{target_distance}"
+            axis="{target_axis}" />
+        </Fallback>
+
+        <Fallback name="ensure_position_known">
+          <PositionKnown known="{known}" />
+          <RecheckArea
+            action_name="search_nearby"
+            x_map="{target_x_map}"
+            y_map="{target_y_map}"
+            known="{known}"
+            x_map_update="{target_x_map}"
+            y_map_update="{target_y_map}"
+            distance="{target_distance}" />
+          <ArmScan name="lost target scan"
+            action_name="scan_area"
+            start_angle="{scan_start_angle}"
+            end_angle="{scan_end_angle}"
+            num_steps="{scan_steps}"
+            min_confidence="{min_confidence}"
+            found="{found}"
+            known="{known}"
+            x_map="{target_x_map}"
+            y_map="{target_y_map}"
+            distance="{target_distance}"
+            axis="{target_axis}" />
+        </Fallback>
+
+        <Fallback name="reach_standoff">
+          <AtStandoff distance="{target_distance}" />
+          <Nav2Move 
+            action_name="nav2_move"
+            x_map="{target_x_map}"
+            y_map="{target_y_map}"
+            axis="{target_axis}"
+            known="{known}"
+            x_map_update="{target_x_map}"
+            y_map_update="{target_y_map}"
+            distance="{target_distance}" />
+        </Fallback>
+
+        <Fallback name="reach_final_pose">
+          <AtFinalPose distance="{target_distance}" />
+          <RotateAndMoveShortDistance
+            action_name="rotate_and_move_short_distance"
+            x_map="{target_x_map}"
+            y_map="{target_y_map}"
+            axis="{target_axis}"
+            known="{known}"
+            x_map_update="{target_x_map}"
+            y_map_update="{target_y_map}"
+            distance="{target_distance}"/>
+          <TargetReached name="Final Target params"
+            found="{found}"
+            known="{known}"
+            distance="{target_distance}" />
+        </Fallback>
+
+
+
+      </ReactiveSequence>
+
+    </Fallback>
+  </BehaviorTree>
+</root>

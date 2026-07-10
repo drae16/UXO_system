@@ -1,0 +1,14 @@
+# Goal
+float32 scan_start_angle
+float32 scan_end_angle
+int32   scan_steps
+float32 min_confidence
+---
+# Result
+bool    succeeded
+float32 final_x_map
+float32 final_y_map
+float32 final_distance
+---
+# Feedback
+float32 progress

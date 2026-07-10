@@ -1,0 +1,15 @@
+servo_node_main:
+  ros__parameters:
+    moveit_servo:
+      move_group_name: interbotix_arm
+      planning_frame: vx300s/base_link
+      ee_frame_name: vx300s/ee_gripper_link
+      robot_link_command_frame: vx300s/base_link
+      command_in_type: "speed_units"
+      joint_command_in_topic: "delta_joint_cmds"
+
+      publish_period: 0.01
+
+      joint_topic: /vx300s/joint_states
+      command_out_topic: /vx300s/arm_controller/joint_trajectory
+      command_out_type: trajectory_msgs/JointTrajectory
