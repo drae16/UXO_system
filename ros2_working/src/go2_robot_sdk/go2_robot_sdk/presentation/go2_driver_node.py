@@ -87,10 +87,10 @@ class Go2DriverNode(Node):
                 ('robot_ip', robot_ip),
                 ('token', token),
                 ('conn_type', conn_type),
-                ('enable_video', False),
+                ('enable_video', True),
                 ('decode_lidar', True),
                 ('publish_raw_voxel', False),
-                ('obstacle_avoidance', False),
+                ('obstacle_avoidance', True),
             ]
         )
 

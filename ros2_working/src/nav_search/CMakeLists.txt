@@ -13,6 +13,7 @@ find_package(tf2_geometry_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(control_msgs REQUIRED)
 #find_package(go2_robot_sdk REQUIRED)
+find_package(interbotix_xs_msgs REQUIRED)
 
 
 # ---- Actions ----
@@ -34,6 +35,7 @@ ament_target_dependencies(arm_search
   nav2_msgs
   tf2_ros
   tf2_geometry_msgs
+  interbotix_xs_msgs
 )
 
 rosidl_target_interfaces(arm_search
@@ -65,6 +67,7 @@ install(TARGETS
 # ---- Python node (just a script) ----
 install(PROGRAMS
   scripts/yolo_node.py
+  scripts/arm_test.py
   DESTINATION lib/${PROJECT_NAME})
 
 # Export action interfaces

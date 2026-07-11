@@ -45,7 +45,7 @@ class YoloDetectNode(Node):
         "models",
         "pipes.pt"
         )
-        self.model = YOLO(model_path,)
+        self.model = YOLO(model_path)
 
         self.tf_buffer = Buffer()
 
@@ -149,7 +149,7 @@ class YoloDetectNode(Node):
 
         
         # 1) YOLO detect
-        results = self.model.predict(img,conf=0.7)[0]
+        results = self.model.predict(img,conf=0.7,show=False)[0]
         boxes = results.boxes
 
         #remove later
@@ -165,7 +165,9 @@ class YoloDetectNode(Node):
             ROLL = roll * 180/math.pi
             TILT = 90 - (tilt *180/math.pi)
             HEADING= heading *180/math.pi 
-            self.get_logger().info(f"camera pos = height ={position.z}, roll={ROLL}, tilt = {TILT} , heading = {HEADING}")
+            X_POS = position.x
+            Y_POS = position.y
+            self.get_logger().info(f"camera pos = height ={position.z}, X = {X_POS}", Y = {Y_POS})
         except:
             pass
 
@@ -209,6 +211,8 @@ class YoloDetectNode(Node):
             self.TILT = 90 - (tilt *180/math.pi)
             self.HEADING= heading *-180/math.pi 
             self.ELEVATION = position.z 
+            self.POS_X = position.x
+            self.Y_POS = position.y
             
 
 
