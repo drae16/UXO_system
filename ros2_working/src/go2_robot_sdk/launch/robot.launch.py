@@ -199,7 +199,7 @@ class Go2NodeFactory:
                 executable='lidar_to_pointcloud_node',
                 name='lidar_to_pointcloud',
                 remappings=[
-                    ('robot0/point_cloud2', 'point_cloud2'),  # Remap for single robot mode
+                    ('point_cloud2', 'point_cloud2'),  # Remap for single robot mode
                 ] if self.config.conn_mode == 'single' else [],
                 parameters=[{
                     'robot_ip_lst': self.config.robot_ip_list,

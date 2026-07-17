@@ -131,7 +131,7 @@ void LidarToPointCloudNode::setupSubscriptions()
   if (config_.robot_ip_list.size() == 1) {
     // Single robot mode
     auto subscription = this->create_subscription<sensor_msgs::msg::PointCloud2>(
-      "/robot0/point_cloud2",
+      "/point_cloud2",
       qos,
       std::bind(&LidarToPointCloudNode::lidarCallback, this, std::placeholders::_1)
     );

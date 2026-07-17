@@ -1,7 +1,6 @@
 
 #!/usr/bin/env python3
 import math, time, threading
-from collections import deque
 from typing import Optional
 
 import rclpy
@@ -12,6 +11,7 @@ from rclpy.action import ActionClient
 from go2_interfaces.msg import WebRtcReq
 from geometry_msgs.msg import PoseStamped, Quaternion, Vector3
 from nav2_msgs.action import NavigateToPose
+from sensor_msgs.msg import NavSatFix
 from robot_localization.srv import FromLL
 from std_msgs.msg import Empty
 from nav_search.action import ScanArea 
@@ -23,6 +23,16 @@ def yaw_to_quat(yaw: float) -> Quaternion:
     q.y = 0.0
     q.z = math.sin(yaw * 0.5)
     return q
+
+
+def gps_distance(lat1, lon1, lat2, lon2):
+    R = 6371000.0  # meters
+    lat1r, lat2r = math.radians(lat1), math.radians(lat2)
+    dlat = lat2r - lat1r
+    dlon = math.radians(lon2 - lon1)
+    x = dlon * math.cos((lat1r + lat2r) / 2.0)
+    y = dlat
+    return R * math.sqrt(x * x + y * y)
 
 
 class GPSNavigator:
@@ -151,15 +161,22 @@ class GPSNode(Node):
             history=HistoryPolicy.KEEP_LAST,
             depth=100,
         )
+
+        self.current_lat: Optional[float] = None
+        self.current_lon: Optional[float] = None
+        
+
+        self.sub_fix = self.create_subscription(NavSatFix, "/fix", self._cb_fix, qos )
         self.sub = self.create_subscription(Vector3, "gps_targets", self._cb_target, qos)
 
         self.publisher_command = self.create_publisher(WebRtcReq, '/webrtc_req', 10)
-
         self.publisher_completion = self.create_publisher(Empty, 'input_at_waypoint/input',10)
 
 
-        self.queue = deque()
+        self.queue = []  
+
         self._lock = threading.Lock()
+        self._pos_lock = threading.Lock()
 
         # Navigator wrapper
         self.navigator = GPSNavigator(self)
@@ -173,26 +190,53 @@ class GPSNode(Node):
             self.queue.append((msg.x, msg.y, msg.z))  # (lat, lon, yaw in radians)
         self.get_logger().info(f"Queued waypoint: {msg.x}, {msg.y}, {msg.z}")
 
+
+        
+    def _cb_fix(self, msg: NavSatFix):
+        with self._pos_lock:
+            self.current_lat = msg.latitude
+            self.current_lon = msg.longitude
+    
     def _worker_loop(self):
         while rclpy.ok():
-            if not self.queue:
-                time.sleep(0.1)
+            with self._pos_lock:
+                cur_lat, cur_lon = self.current_lat, self.current_lon
+
+            if cur_lat is None:
+                self.get_logger().warn("No GPS fix yet, waiting...")
+                time.sleep(0.5)
                 continue
 
             with self._lock:
-                lat, lon, yaw = self.queue.popleft()
+                if not self.queue:
+                    target = None
+                else:
+                    best_idx = min(
+                        range(len(self.queue)),
+                        key=lambda i: gps_distance(
+                            cur_lat, cur_lon,
+                            self.queue[i][0], self.queue[i][1]
+                        )
+                    )
+                    target = self.queue.pop(best_idx)
 
+            if target is None:
+                time.sleep(0.1)
+                continue
+
+            lat, lon, yaw = target
             pose = self._convert_gps(lat, lon, yaw)
-            
             if pose is None:
                 continue
 
             ok = self.navigator.go_to_pose(pose)
+
             if ok:
                 self.get_logger().info("Reached goal, running task...")
-                self.run_task_for(pose)  
+                self.run_task_for(pose)
             else:
                 self.get_logger().warn("Navigation failed/canceled")
+
 
     def _convert_gps(self, lat: float, lon: float, yaw: float) -> Optional[PoseStamped]:
         req = FromLL.Request()
@@ -229,9 +273,9 @@ class GPSNode(Node):
         self.get_logger().info(f'Running task at waypoint ({x:.2f}, {y:.2f})')
 
         scan = self.navigator.call_scan_area()
-        time.sleep(2)
+        
 
-    time.sleep(8)
+
 
     
 
