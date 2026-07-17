@@ -193,29 +193,32 @@ class Go2NodeFactory:
                     'conn_type': self.config.conn_type
                 }],
             ),
-            # LiDAR processing node (new separate package)
+            # LiDAR processing node (C++ implementation)
             Node(
-                package='lidar_processor',
-                executable='lidar_to_pointcloud',
+                package='lidar_processor_cpp',
+                executable='lidar_to_pointcloud_node',
                 name='lidar_to_pointcloud',
+                remappings=[
+                    ('robot0/point_cloud2', 'point_cloud2'),  # Remap for single robot mode
+                ] if self.config.conn_mode == 'single' else [],
                 parameters=[{
                     'robot_ip_lst': self.config.robot_ip_list,
                     'map_name': self.config.map_name,
                     'map_save': self.config.save_map
                 }],
             ),
-            # Advanced point cloud aggregator
+            # Advanced point cloud aggregator (C++ implementation)
             Node(
-                package='lidar_processor',
-                executable='pointcloud_aggregator',
+                package='lidar_processor_cpp',
+                executable='pointcloud_aggregator_node',
                 name='pointcloud_aggregator',
                 parameters=[{
                     'max_range': 20.0,
                     'min_range': 0.1,
                     'height_filter_min': -2.0,
                     'height_filter_max': 3.0,
-                    'downsample_rate': 5,
-                    'publish_rate': 10.0
+                    'downsample_rate': 1,
+                    'publish_rate': 20.0
                 }],
             ),
             # TTS Node (new separate package)
