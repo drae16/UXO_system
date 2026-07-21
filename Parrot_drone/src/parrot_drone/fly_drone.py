@@ -1,8 +1,12 @@
 import rclpy
+import csv
 from parrot_drone.drone_setup  import DroneAnafi
 from rclpy.node import Node
 from  geometry_msgs.msg import Vector3
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
+
+
+
 
 class FlyDrone(Node):    
     def __init__(self):
@@ -17,13 +21,33 @@ class FlyDrone(Node):
 
         self.publisher = self.create_publisher(Vector3, '/gps_targets', qos)
 
-        
+        self.declare_parameter("test_num", f"0")
+        test_num = self.get_parameter("test_num").value
+        self.csv_path = f"/home/drl/Data/target_detection/test{test_num}.csv"
+        self._next_id = 0
+        self._init_csv()
 
 
-        self.parrot = DroneAnafi(2,25,10,3)
+        self.parrot = DroneAnafi(2,25,10)
         self.planner = self.parrot.flight_planner
 
+    def _init_csv(self):
+        try:
+            with open(self.csv_path, "w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(["id", "drone_lat", "drone_lon", "target_lat", "target_lon"])
+        except OSError as e:
+            self.get_logger().error(f"Failed to initialize CSV: {e}")
 
+    def _log_detection(self, drone_lat, drone_lon, target_lat, target_lon):
+        row = (self._next_id, drone_lat, drone_lon, target_lat, target_lon)
+        self._next_id += 1
+        try:
+            with open(self.csv_path, "a", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(row)
+        except OSError as e:
+            self.get_logger().error(f"Failed to write CSV row: {e}")
 
 
     def execute_scan(self):
@@ -50,6 +74,7 @@ class FlyDrone(Node):
                         if result:
                             for position in pos:
                                 self.get_logger().info(f"Target found at {position[0]}, {position[1]} ")
+                                self._log_detection(lat, lon, position[0], position[1])
                                 msg = Vector3()
                                 msg.x = position[0]
                                 msg.y = position[1]

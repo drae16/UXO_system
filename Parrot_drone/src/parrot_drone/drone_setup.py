@@ -85,10 +85,13 @@ class Planner:
                  plan_drone,
                  distance_x,
                  distance_y,
-                 coverage_per_image_x,):
+                 coverage_per_image_x,
+                 coverage_per_image_y):
+        
         self.distance_x = distance_x
         self.distance_y =distance_y
-        self.coverage = coverage_per_image_x
+        self.coverage_x = coverage_per_image_x
+        self.coverage_y = coverage_per_image_y
         self.plan_drone = plan_drone
         self.logger = getLogger("planner logger")
 
@@ -152,8 +155,8 @@ class Planner:
 
 
     def generate_flight_grid(self):
-        r = np.ceil(self.distance_x / self.coverage)
-        c = np.ceil(self. distance_y / self.coverage)
+        r = np.ceil(self.distance_x / (0.7 * self.coverage_x))
+        c = np.ceil(self. distance_y / (0.7 * self.coverage_y))
 
         return int(r), int(c)
 
@@ -262,15 +265,17 @@ class ImageProcessor:
 
 class DroneAnafi:
     
-    def __init__(self, flight_altitude,dis_x,dis_y,coverage_per_img):
+    def __init__(self, flight_altitude,dis_x,dis_y):
         self.drone = olympe.SkyController(SKYCTRL_IP)
         #self.drone = olympe.Drone(SIM_DRONE)
         assert self.drone.connect(timeout=2.0,retry=2)
 
         self.logger = getLogger("drone logger")
-        self.flight_planner = Planner(self.drone,distance_x=dis_x ,distance_y=dis_y, coverage_per_image_x=coverage_per_img)
         self.alt = flight_altitude
-        self.coverage = coverage_per_img
+        self.coverage_x = 2* self.alt * math.tan((75*math.pi/180)/2)
+        self.coverage_y = 2* self.alt * math.tan((60*math.pi/180)/2)
+
+        self.flight_planner = Planner(self.drone,distance_x=dis_x ,distance_y=dis_y, coverage_per_image_x=self.coverage_x, coverage_per_image_y = self.coverage_y)
 
         self.rgb_processor = ImageProcessor(model_path,RGB_PARAMS)
         self.ir_processor = ImageProcessor(model_path, IR_PARAMS)
