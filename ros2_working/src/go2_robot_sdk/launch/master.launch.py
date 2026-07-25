@@ -30,16 +30,13 @@ def generate_launch_description():
             executable='arm_search',
             name='arm_search',
             output='screen',
-            # parameters=[...],
-            # remappings=[...],
+            remappings=[('/joint_states', '/vx300s/joint_states')],
         ),
         Node(
             package='nav_search',
             executable='track_target',
             name='track_target',
             output='screen',
-            # parameters=[...],
-            # remappings=[...],
         ),
 
         Node(
@@ -47,7 +44,5 @@ def generate_launch_description():
             executable='yolo_node.py',
             name='yolo_node',
             output='screen',
-            # parameters=[...],
-            # remappings=[...],
         ),
     ])

@@ -70,7 +70,7 @@ class YoloDetectNode(Node):
             self.execute_cb,
         )
 
-        self.FOCAL_LENGTH = 453.4608 #flir values 13.6 # Focal length in mm
+        self.FOCAL_LENGTH = 553.4608 #flir values 13.6 # Focal length in mm
         self.IMAGE_SIZE = (640,480) # Image size in pixels
         self.POS_X = 0 # x location of camera in meters (relative frame of reference for image info)
         self.POS_Y = 0
@@ -167,7 +167,7 @@ class YoloDetectNode(Node):
             HEADING= heading *180/math.pi 
             X_POS = position.x
             Y_POS = position.y
-            self.get_logger().info(f"camera pos = height ={position.z}, X = {X_POS}", Y = {Y_POS})
+            self.get_logger().info(f"camera pos = height ={position.z}, X = {X_POS}, Y = {Y_POS}")
         except:
             pass
 
@@ -211,8 +211,8 @@ class YoloDetectNode(Node):
             self.TILT = 90 - (tilt *180/math.pi)
             self.HEADING= heading *-180/math.pi 
             self.ELEVATION = position.z 
-            self.POS_X = position.x
-            self.Y_POS = position.y
+            self.POS_X = -position.y
+            self.POS_Y = position.x
             
 
 
@@ -228,6 +228,7 @@ class YoloDetectNode(Node):
         # 3) compute (x, y) of target using YOUR existing function
         # center of bbox:
         self.get_logger().info(f"camera pos = z={self.ELEVATION}, tilt = {self.TILT} , heading = {self.HEADING}")
+        self.get_logger().info(f"camera pos = height ={self.ELEVATION}, X = {self.POS_Y}, Y = {-self.POS_X}")
         x_min, y_min, x_max, y_max = best.xyxy[0].tolist()
         u = (x_min + x_max) / 2.0
         v = (y_min + y_max) / 2.0
@@ -239,7 +240,9 @@ class YoloDetectNode(Node):
         # call your function here, e.g.:
         # x_base, y_base = self.compute_xy_from_pixel(u, v, tf, intrinsics, ...)
         x_base, y_base, z_base = self.spatial_transformation(Img_location,"Z",0)
-        self.get_logger().info(f"Coordinates found x= {x_base},y = {y_base},z= {z_base}")
+        self.get_logger().info(f"Coordinates found x= {y_base},y = {-x_base},z= {z_base}")
+        dist = math.sqrt(x_base*x_base + y_base* y_base)
+        self.get_logger().info(f"Coordinates found distance= {dist}")
         result.found = True
         result.x_base = float(y_base)
         result.y_base = float(-1*x_base)

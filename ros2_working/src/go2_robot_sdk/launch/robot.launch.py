@@ -322,7 +322,7 @@ class Go2NodeFactory:
             Node(
                 package='tf2_ros',
                 executable='static_transform_publisher',
-                arguments=["0", "0", "0.08", "0", "0", "0", "base_link", "vx300s/base_link"]
+                arguments=["0.1", "0", "0.12", "0", "0", "0", "base_link", "vx300s/base_link"]
             ),
     ]
 

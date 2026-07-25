@@ -162,12 +162,19 @@ class GPSNode(Node):
             depth=100,
         )
 
+        qos_fix = QoSProfile(
+            durability=DurabilityPolicy.VOLATILE,
+            reliability=ReliabilityPolicy.RELIABLE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=100,
+        )
+
         self.current_lat: Optional[float] = None
         self.current_lon: Optional[float] = None
         
 
-        self.sub_fix = self.create_subscription(NavSatFix, "/fix", self._cb_fix, qos )
-        self.sub = self.create_subscription(Vector3, "gps_targets", self._cb_target, qos)
+        self.sub_fix = self.create_subscription(NavSatFix, "/fix", self._cb_fix,qos_fix )
+        self.sub = self.create_subscription(Vector3, "/gps_targets", self._cb_target, qos)
 
         self.publisher_command = self.create_publisher(WebRtcReq, '/webrtc_req', 10)
         self.publisher_completion = self.create_publisher(Empty, 'input_at_waypoint/input',10)

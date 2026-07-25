@@ -6,6 +6,8 @@
 #include <future>
 #include <cmath>
 #include <mutex>
+#include <algorithm>
+
 #include <sensor_msgs/msg/joint_state.hpp>
 #include <interbotix_xs_msgs/msg/joint_single_command.hpp>
 
@@ -31,6 +33,29 @@
 
 using namespace std::chrono_literals;
 
+enum class ScanState {
+  FULL_SCAN,
+  EVALUATE_DISTANCE,
+  NAV2_APPROACH,
+  VELOCITY_APPROACH,
+  LOCAL_RECOVERY,
+  FINAL_INSPECTION,
+  COMPLETE,
+  ABORTED
+};
+
+struct ScanContext {
+  int    sweep_count = 0;
+  int    max_sweeps_effective = 0;
+
+  double target_x_odom = 0.0;
+  double target_y_odom = 0.0;
+  double current_distance_to_target = 0.0;
+
+  double x_base_last = 0.0;
+  double y_base_last = 0.0;
+};
+
 class ArmSearchNode : public rclcpp::Node
 {
 public:
@@ -53,31 +78,37 @@ public:
     // --- Parameters ---
     planning_group_   = this->declare_parameter<std::string>("planning_group", "interbotix_arm");
     base_joint_name_  = this->declare_parameter<std::string>("base_joint_name", "waist");
-    wrist_joint_name_ = this->declare_parameter<std::string>("wrist_joint_name", "wrist_angle");  // NEW
+    wrist_joint_name_ = this->declare_parameter<std::string>("wrist_joint_name", "wrist_angle");
     arm_base_frame_   = this->declare_parameter<std::string>("arm_base_frame", "vx300s/base_link");
     ee_link_          = this->declare_parameter<std::string>("ee_link", "vx300s/ee_gripper_link");
-    cam_link_          = this->declare_parameter<std::string>("cam_link", "vx300s/camera_link");
+    cam_link_         = this->declare_parameter<std::string>("cam_link", "vx300s/camera_link");
 
     start_angle_      = this->declare_parameter<double>("start_angle", -1.5);
     end_angle_        = this->declare_parameter<double>("end_angle",   1.5);
     num_steps_        = this->declare_parameter<int>("num_steps",      10);
 
-    camera_height_        = this->declare_parameter<double>("camera_height",       0.5);  // z = b
+    camera_height_        = this->declare_parameter<double>("camera_height",       0.5);
     radius_min_           = this->declare_parameter<double>("camera_radius_min",   0.20);
     radius_max_           = this->declare_parameter<double>("camera_radius_max",   0.45);
     radius_scale_factor_  = this->declare_parameter<double>("camera_radius_scale", 0.2);
 
-    desired_dist_         = this->declare_parameter<double>("desired_distance", 0.35);
-    desired_dist_tol_     = this->declare_parameter<double>("desired_distance_tolerance", 0.15);
-    
     yaw_tolerance_rad_ = this->declare_parameter<double>("yaw_tolerance_rad", 0.05);
+    side_offset_        = this->declare_parameter<double>("side_offset", 0.40);
 
-    side_offset_ = this->declare_parameter<double>("side_offset", 0.40);
-
-    joint_move_tolerance_ = this->declare_parameter<double>("joint_move_tolerance", 0.02);   // rad
-    joint_move_timeout_   = this->declare_parameter<double>("joint_move_timeout", 3.0);       // sec
+    joint_move_tolerance_ = this->declare_parameter<double>("joint_move_tolerance", 0.02);
+    joint_move_timeout_   = this->declare_parameter<double>("joint_move_timeout", 3.0);
     joint_poll_rate_hz_   = this->declare_parameter<double>("joint_poll_rate_hz", 30.0);
 
+    // --- FSM tunables ---
+    max_sweeps_             = this->declare_parameter<int>("max_sweeps", 3);
+    desired_final_distance_ = this->declare_parameter<double>("desired_final_distance", 0.40);
+    nav2_switch_distance_   = this->declare_parameter<double>("nav2_switch_distance", 1.5);
+    nav2_approach_margin_   = this->declare_parameter<double>("nav2_approach_margin", 0.2);
+
+    local_recovery_rotation_deg_    = this->declare_parameter<double>("local_recovery_rotation_deg", 30.0);
+    local_recovery_waist_range_deg_ = this->declare_parameter<double>("local_recovery_waist_range_deg", 15.0);
+    local_recovery_waist_steps_     = this->declare_parameter<int>("local_recovery_waist_steps", 5);
+    local_recovery_wrist_delta_deg_ = this->declare_parameter<double>("local_recovery_wrist_delta_deg", 10.0);
 
     cmd_vel_pub_ = this->create_publisher<geometry_msgs::msg::Twist>(
       "/cmd_vel_out", 10);
@@ -99,7 +130,6 @@ public:
     // TF
     tf_buffer_   = std::make_shared<tf2_ros::Buffer>(this->get_clock());
     tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
-    
 
     // ScanArea action server
     scan_server_ = rclcpp_action::create_server<ScanArea>(
@@ -108,7 +138,6 @@ public:
       std::bind(&ArmSearchNode::handle_scan_goal,     this, std::placeholders::_1, std::placeholders::_2),
       std::bind(&ArmSearchNode::handle_scan_cancel,   this, std::placeholders::_1),
       std::bind(&ArmSearchNode::handle_scan_accepted, this, std::placeholders::_1)
-    
     );
   }
 
@@ -199,7 +228,6 @@ private:
     }
   }
 
-
   void init_track_client_if_needed()
   {
     if (!track_client_) {
@@ -207,6 +235,7 @@ private:
       track_client_ = this->create_client<TrackTarget>("track_target");
     }
   }
+
   // === ScanArea action callbacks ============================================
 
   rclcpp_action::GoalResponse handle_scan_goal(
@@ -234,7 +263,7 @@ private:
 
   // === TF helpers ===========================================================
 
-  bool get_robot_pose_map(double &x, double &y, double &yaw)
+  bool get_robot_pose_odom(double &x, double &y, double &yaw)
   {
     if (!tf_buffer_) {
       return false;
@@ -242,11 +271,10 @@ private:
 
     geometry_msgs::msg::TransformStamped tf;
     try {
-      // map -> base_link (quadruped base)
-      tf = tf_buffer_->lookupTransform("map", "base_link", tf2::TimePointZero);
+      tf = tf_buffer_->lookupTransform("odom", "base_link", tf2::TimePointZero);
     }
     catch (const tf2::TransformException & ex) {
-      RCLCPP_WARN(get_logger(), "Failed to get transform map->base_link: %s", ex.what());
+      RCLCPP_WARN(get_logger(), "Failed to get transform odom->base_link: %s", ex.what());
       return false;
     }
 
@@ -265,34 +293,28 @@ private:
   geometry_msgs::msg::Pose compute_camera_pose_on_circle(
     const geometry_msgs::msg::Point &target_arm)
   {
-    // target in arm base frame
     double X = target_arm.x;
     double Y = target_arm.y;
     double Z = target_arm.z;
 
-    // Horizontal distance
     double r_xy = std::sqrt(X*X + Y*Y);
     if (r_xy < 1e-3) {
       r_xy = 1e-3;
     }
 
-    // Unit direction in XY toward target
     double ux = X / r_xy;
     double uy = Y / r_xy;
 
-    // Desired radius band [radius_min_, radius_max_]
     double R_des = radius_scale_factor_ * r_xy;
     if (R_des < radius_min_) R_des = radius_min_;
     if (R_des > radius_max_) R_des = radius_max_;
 
     geometry_msgs::msg::Pose cam_pose;
 
-    // Position on the circle at height camera_height_
     cam_pose.position.x = ux * R_des;
     cam_pose.position.y = uy * R_des;
     cam_pose.position.z = camera_height_;
 
-    RCLCPP_INFO(get_logger(), "Z position should be %.2f", cam_pose.position.z);
     tf2::Vector3 cam_pos(
       cam_pose.position.x,
       cam_pose.position.y,
@@ -300,28 +322,19 @@ private:
 
     tf2::Vector3 tgt_pos(X, Y, Z);
 
-    // X axis: from camera to target
     tf2::Vector3 x_axis = tgt_pos - cam_pos;
-    
+
     if (x_axis.length2() < 1e-6) {
-      // Degenerate: default forward
       x_axis = tf2::Vector3(1.0, 0.0, 0.0);
     }
-    RCLCPP_INFO(get_logger(), "target  location vector  %.2f , %.2f, %.2f wrt to arm frame", x_axis.x() , x_axis.y(), x_axis.z());
 
     x_axis.normalize();
 
-    // Use "world up" to build a right-handed frame
     tf2::Vector3 world_up(0.0, 0.0, 1.0);
-
-   //y axis is always parallel to the ground
     tf2::Vector3 y_axis = x_axis.cross(-world_up);
-
-    // Y axis completes the right-handed frame
     tf2::Vector3 z_axis = x_axis.cross(y_axis);
 
     if (y_axis.length2() < 1e-6) {
-      // x is almost parallel to world_up; pick arbitrary z
       z_axis = tf2::Vector3(0.0, 0.0, 1.0);
       y_axis = tf2::Vector3(0.0, 1.0, 0.0);
       x_axis = tf2::Vector3(1.0, 0.0, 0.0);
@@ -329,9 +342,6 @@ private:
     y_axis.normalize();
     z_axis.normalize();
 
-    RCLCPP_INFO(get_logger(), "x_axis should be pointing %.2f,%.2f, %.2f", x_axis.x() , x_axis.y(), x_axis.z());
-
-    // Rotation matrix with columns = (X, Y, Z) basis of the camera
     tf2::Matrix3x3 R(
       x_axis.x(), y_axis.x(), z_axis.x(),
       x_axis.y(), y_axis.y(), z_axis.y(),
@@ -349,37 +359,36 @@ private:
        return cam_pose;
     }
 
-    
     return ee_pose;
   }
 
   bool cameraPoseToEePoseInBase(const geometry_msgs::msg::Pose& cam_pose_in_base,
                               geometry_msgs::msg::Pose& ee_pose_in_base)
   {
-  geometry_msgs::msg::TransformStamped ee_to_cam;
-  try {
-    ee_to_cam = tf_buffer_->lookupTransform(
-      ee_link_,   
-      cam_link_, 
-      tf2::TimePointZero);
-  } catch (const tf2::TransformException& ex) {
-    RCLCPP_WARN(get_logger(), "TF lookup %s->%s failed: %s",
-                ee_link_.c_str(), cam_link_.c_str(), ex.what());
-    return false;
+    geometry_msgs::msg::TransformStamped ee_to_cam;
+    try {
+      ee_to_cam = tf_buffer_->lookupTransform(
+        ee_link_,
+        cam_link_,
+        tf2::TimePointZero);
+    } catch (const tf2::TransformException& ex) {
+      RCLCPP_WARN(get_logger(), "TF lookup %s->%s failed: %s",
+                  ee_link_.c_str(), cam_link_.c_str(), ex.what());
+      return false;
+    }
+
+    tf2::Transform T_base_cam, T_ee_cam;
+    tf2::fromMsg(cam_pose_in_base, T_base_cam);
+    tf2::fromMsg(ee_to_cam.transform, T_ee_cam);
+
+    tf2::Transform T_base_ee = T_base_cam * T_ee_cam.inverse();
+
+    ee_pose_in_base.position.x = T_base_ee.getOrigin().x();
+    ee_pose_in_base.position.y = T_base_ee.getOrigin().y();
+    ee_pose_in_base.position.z = T_base_ee.getOrigin().z();
+    ee_pose_in_base.orientation = tf2::toMsg(T_base_ee.getRotation());
+    return true;
   }
-
-  tf2::Transform T_base_cam, T_ee_cam;
-  tf2::fromMsg(cam_pose_in_base, T_base_cam);
-  tf2::fromMsg(ee_to_cam.transform, T_ee_cam);
-
-  tf2::Transform T_base_ee = T_base_cam * T_ee_cam.inverse();
-
-  ee_pose_in_base.position.x = T_base_ee.getOrigin().x();
-  ee_pose_in_base.position.y = T_base_ee.getOrigin().y();
-  ee_pose_in_base.position.z = T_base_ee.getOrigin().z();
-  ee_pose_in_base.orientation = tf2::toMsg(T_base_ee.getRotation());
-  return true;
-}
 
   bool move_arm_to_pose(const geometry_msgs::msg::Pose &pose)
   {
@@ -407,6 +416,8 @@ private:
     return true;
   }
 
+  // === Joint state tracking =================================================
+
   void joint_state_callback(const sensor_msgs::msg::JointState::SharedPtr msg)
   {
     std::lock_guard<std::mutex> lock(joint_state_mutex_);
@@ -426,9 +437,6 @@ private:
     return true;
   }
 
-  // Publishes a single-joint command and polls /joint_states until the joint
-  // is within tolerance of the target (checked on 2 consecutive polls), or
-  // until timeout elapses.
   bool move_single_joint_fast(const std::string &joint_name, double target_angle)
   {
     if (!joint_single_pub_) {
@@ -483,29 +491,82 @@ private:
       rate.sleep();
     }
 
-    return false;  // rclcpp::ok() went false (shutdown)
+    return false;
   }
 
+  bool move_base_to(double target_angle)
+  {
+    return move_single_joint_fast(base_joint_name_, target_angle);
+  }
 
-  // Track once given target in MAP frame: map -> arm_base -> circle pose -> MoveIt
-  bool track_target_once(double target_x_map, double target_y_map)
+  bool move_wrist_to(double target_angle)
+  {
+    return move_single_joint_fast(wrist_joint_name_, target_angle);
+  }
+
+  // === Full-arm joint state capture/restore (for verify-fail rollback) ======
+
+  std::map<std::string, double> capture_arm_joint_state()
+  {
+    std::map<std::string, double> state;
+    if (!move_group_) return state;
+
+    move_group_->setStartStateToCurrentState();
+    std::vector<std::string> names  = move_group_->getJointNames();
+    std::vector<double>      values = move_group_->getCurrentJointValues();
+
+    for (size_t i = 0; i < names.size() && i < values.size(); ++i) {
+      state[names[i]] = values[i];
+    }
+    return state;
+  }
+
+  bool restore_arm_joint_state(const std::map<std::string, double> &saved_state)
+  {
+    if (!move_group_ || saved_state.empty()) return false;
+
+    RCLCPP_INFO(get_logger(), "Restoring arm to pre-track_target_once joint state");
+
+    move_group_->setStartStateToCurrentState();
+    if (!move_group_->setJointValueTarget(saved_state)) {
+      RCLCPP_ERROR(get_logger(), "Failed to set joint value target for state restore");
+      return false;
+    }
+
+    moveit::planning_interface::MoveGroupInterface::Plan plan;
+    auto code = move_group_->plan(plan);
+    if (code != moveit::core::MoveItErrorCode::SUCCESS) {
+      RCLCPP_WARN(get_logger(), "No plan found to restore joint state (error %d)", code.val);
+      return false;
+    }
+
+    auto exec_code = move_group_->execute(plan);
+    if (exec_code != moveit::core::MoveItErrorCode::SUCCESS) {
+      RCLCPP_WARN(get_logger(), "Execution to restore joint state failed (error %d)", exec_code.val);
+      return false;
+    }
+    return true;
+  }
+
+  // Track once given target in ODOM frame: odom -> arm_base -> circle pose -> MoveIt
+  bool track_target_once(double target_x_odom, double target_y_odom)
   {
     if (!tf_buffer_) return false;
 
-    geometry_msgs::msg::PoseStamped tgt_map;
-    tgt_map.header.frame_id = "map";
-    tgt_map.header.stamp    = this->now();
-    tgt_map.pose.position.x = target_x_map;
-    tgt_map.pose.position.y = target_y_map;
-    tgt_map.pose.position.z = 0.0;
-    tgt_map.pose.orientation.w = 1.0;
+    geometry_msgs::msg::PoseStamped tgt_odom;
+    tgt_odom.header.frame_id = "odom";
+    tgt_odom.header.stamp    = this->now();
+    tgt_odom.pose.position.x = target_x_odom;
+    tgt_odom.pose.position.y = target_y_odom;
+    tgt_odom.pose.position.z = 0.0;
+    tgt_odom.pose.orientation.w = 1.0;
 
     geometry_msgs::msg::PoseStamped tgt_arm;
     try {
-      tgt_arm = tf_buffer_->transform(tgt_map, arm_base_frame_, tf2::durationFromSec(0.5));
+      tgt_arm = tf_buffer_->transform(tgt_odom, arm_base_frame_, tf2::durationFromSec(0.5));
     }
     catch (const tf2::TransformException & ex) {
-      RCLCPP_WARN(get_logger(), "Transform map->%s failed: %s",
+      RCLCPP_WARN(get_logger(), "Transform odom->%s failed: %s",
                   arm_base_frame_.c_str(), ex.what());
       return false;
     }
@@ -574,21 +635,6 @@ private:
     return true;
   }
 
-
-
-  bool move_base_to(double target_angle)
-  {
-    return move_single_joint_fast(base_joint_name_, target_angle);
-  }
-
-
-    bool move_wrist_to(double target_angle)
-  {
-    return move_single_joint_fast(wrist_joint_name_, target_angle);
-  }
-
-
-
   // === YOLO DetectTarget client =============================================
 
   bool call_detect_target(double min_conf, double &x, double &y)
@@ -639,8 +685,7 @@ private:
     return true;
   }
 
-// NEW!! Helper to begin tracking
-  bool call_track_servo_start(double map_x, double map_y)
+  bool call_track_servo_start(double odom_x, double odom_y)
   {
     init_track_client_if_needed();
     if (!track_client_) return false;
@@ -652,10 +697,10 @@ private:
 
     auto request = std::make_shared<TrackTarget::Request>();
     request->enable = true;
-    request->target.header.frame_id = "map";
+    request->target.header.frame_id = "odom";
     request->target.header.stamp = this->now();
-    request->target.point.x = map_x;
-    request->target.point.y = map_y;
+    request->target.point.x = odom_x;
+    request->target.point.y = odom_y;
     request->target.point.z = 0.0;
 
     auto fut = track_client_->async_send_request(request);
@@ -663,7 +708,6 @@ private:
     auto res = fut.get();
     return res && res->accepted;
   }
-
 
   bool call_track_servo_stop()
   {
@@ -677,8 +721,7 @@ private:
 
     auto request = std::make_shared<TrackTarget::Request>();
     request->enable = false;
-    // target ignored when enable=false, but fill frame anyway
-    request->target.header.frame_id = "map";
+    request->target.header.frame_id = "odom";
     request->target.header.stamp = this->now();
     request->target.point.x = 0.0;
     request->target.point.y = 0.0;
@@ -690,10 +733,9 @@ private:
     return res && res->accepted;
   }
 
+  // === Nav2 "step" toward target ============================================
 
-  // === Nav2 "step" toward target with tracking during motion ================
-
-  bool step_nav2_towards_target( double target_x_map, double target_y_map, double desired_dist, double dist_tolerance)
+  bool step_nav2_towards_target(double target_x_odom, double target_y_odom, double desired_dist, double dist_tolerance)
   {
     using namespace std::chrono_literals;
 
@@ -705,14 +747,13 @@ private:
       return false;
     }
 
-    // Current robot pose in map
     double rx, ry, ryaw;
-    if (!get_robot_pose_map(rx, ry, ryaw)) {
+    if (!get_robot_pose_odom(rx, ry, ryaw)) {
       return false;
     }
 
-    double dx = target_x_map - rx;
-    double dy = target_y_map - ry;
+    double dx = target_x_odom - rx;
+    double dy = target_y_odom - ry;
     double dist = std::sqrt(dx*dx + dy*dy);
 
     RCLCPP_INFO(get_logger(),
@@ -735,7 +776,7 @@ private:
     double goal_yaw = std::atan2(dy, dx);
 
     geometry_msgs::msg::PoseStamped goal_pose;
-    goal_pose.header.frame_id = "map";
+    goal_pose.header.frame_id = "odom";
     goal_pose.header.stamp    = this->now();
     goal_pose.pose.position.x = gx;
     goal_pose.pose.position.y = gy;
@@ -755,7 +796,6 @@ private:
 
     auto send_goal_options = Nav2Client::SendGoalOptions();
     auto future_goal = nav2_client_->async_send_goal(goal_msg, send_goal_options);
-
 
     auto goal_handle = future_goal.get();
     if (!goal_handle) {
@@ -778,32 +818,29 @@ private:
     return a;
   }
 
-  bool determine_angle_offset(double target_x_map, double target_y_map, double &calc_move, double ang_speed = 0.50)
+  bool determine_angle_offset(double target_x_odom, double target_y_odom, double &calc_move, double ang_speed = 0.50)
   {
-
     double rx, ry, ryaw;
-    if (!get_robot_pose_map(rx, ry, ryaw)) {
+    if (!get_robot_pose_odom(rx, ry, ryaw)) {
       return false;
     }
 
-    // Direction from robot to target
-    
-    double dx = target_x_map - rx;
-    double dy = target_y_map - ry;
+    double dx = target_x_odom - rx;
+    double dy = target_y_odom - ry;
     double remain_dist = std::sqrt(dx*dx + dy*dy);
     if (remain_dist < 1e-6) {
       calc_move = 0.0;
       return true;
     }
 
-    double theta = 1.5*std::atan2(dy, dx);  // angle to target
-    const double s = side_offset_;   
+    double theta = 1.5*std::atan2(dy, dx);
+    const double s = side_offset_;
     double angle_to_goal = std::atan2(s, remain_dist);
     calc_move = std::sqrt(remain_dist*remain_dist - s*s);
     RCLCPP_INFO(get_logger(),
-            "[Phase B] Distance to move = %.3f",
+            "[VelocityApproach] Distance to move = %.3f",
             calc_move);
-    // Put target on the LEFT side of the dog (90° ccw from line-of-sight)
+
     double yaw_left = normalize_angle(theta - angle_to_goal);
     double yaw_right = normalize_angle(theta + angle_to_goal);
 
@@ -813,19 +850,19 @@ private:
     double yaw_goal  = (std::fabs(err_left) < std::fabs(err_right)) ? yaw_left : yaw_right;
 
     RCLCPP_INFO(get_logger(),
-                "[Phase B] rotate: theta_to_target=%.3f, yaw_goal=%.3f",
+                "[VelocityApproach] rotate: theta_to_target=%.3f, yaw_goal=%.3f",
                 theta, yaw_goal);
 
-    rclcpp::Rate rate(20.0);  // 20 Hz
+    rclcpp::Rate rate(20.0);
 
     while (rclcpp::ok()) {
-      if (!get_robot_pose_map(rx, ry, ryaw)) {
+      if (!get_robot_pose_odom(rx, ry, ryaw)) {
         return false;
       }
 
       double err = normalize_angle(yaw_goal - ryaw);
       if (std::fabs(err) < yaw_tolerance_rad_) {
-        RCLCPP_INFO(get_logger(), "[Phase B] rotation complete, yaw=%.3f", ryaw);
+        RCLCPP_INFO(get_logger(), "[VelocityApproach] rotation complete, yaw=%.3f", ryaw);
         break;
       }
 
@@ -836,49 +873,35 @@ private:
       rate.sleep();
     }
 
-    // Stop rotation
     geometry_msgs::msg::Twist stop;
     cmd_vel_pub_->publish(stop);
     return true;
   }
 
-
-
-
-
-
-
-
-
-
-
-  bool drive_forward_to_side_offset(double target_x_map,double target_y_map, double move_dist, double forward_speed = 0.3)
+  bool drive_forward_to_side_offset(double target_x_odom, double target_y_odom, double move_dist, double forward_speed = 0.3)
   {
     if (!cmd_vel_pub_) {
-      RCLCPP_WARN(get_logger(), "cmd_vel publisher not initialized for Phase B drive");
+      RCLCPP_WARN(get_logger(), "cmd_vel publisher not initialized for VelocityApproach drive");
       return false;
     }
 
     double rx0, ry0, yaw0;
-    if (!get_robot_pose_map(rx0, ry0, yaw0)) {
+    if (!get_robot_pose_odom(rx0, ry0, yaw0)) {
       return false;
     }
 
-    // Current distance to target
-    double dx = target_x_map - rx0;
-    double dy = target_y_map - ry0;
+    double dx = target_x_odom - rx0;
+    double dy = target_y_odom - ry0;
     double dist = std::sqrt(dx*dx + dy*dy);
     if (dist < side_offset_ + 0.05) {
       RCLCPP_INFO(get_logger(),
-                  "[Phase B] already closer than side_offset (dist=%.3f, side=%.3f)",
+                  "[VelocityApproach] already closer than side_offset (dist=%.3f, side=%.3f)",
                   dist, side_offset_);
       return true;
     }
 
-    auto start_time = this->now();
     const double duration = move_dist / forward_speed;
     const double rate_hz  = 20.0;
-
 
     RCLCPP_INFO(get_logger(),
                 "Driving relative: dist=%.2f m, vx=%.2f, dur=%.2f s",
@@ -896,542 +919,470 @@ private:
            (this->now() - start).seconds() < duration) {
       cmd_vel_pub_->publish(cmd);
       rate.sleep();
-      RCLCPP_INFO(get_logger(),
-            "Driving forward %.2f at vx=%.2f",
-            move_dist, forward_speed);
     }
 
-    // Stop at the end
     geometry_msgs::msg::Twist stop;
     cmd_vel_pub_->publish(stop);
-  
-
 
     double rxf, ryf, yawf;
-    if (get_robot_pose_map(rxf, ryf, yawf)) {
-      double dxf = target_x_map - rxf;
-      double dyf = target_y_map - ryf;
+    if (get_robot_pose_odom(rxf, ryf, yawf)) {
+      double dxf = target_x_odom - rxf;
+      double dyf = target_y_odom - ryf;
       double final_dist = std::sqrt(dxf*dxf + dyf*dyf);
       RCLCPP_INFO(get_logger(),
-                  "[Phase B] final distance to target ~ %.3f m", final_dist);
+                  "[VelocityApproach] final distance to target ~ %.3f m", final_dist);
     }
 
     return true;
   }
 
-  std::map<std::string, double> capture_arm_joint_state()
+  bool rotate_base_link_relative(double delta_rad, double ang_speed = 0.5)
   {
-    std::map<std::string, double> state;
-    if (!move_group_) return state;
+    double rx, ry, ryaw_start;
+    if (!get_robot_pose_odom(rx, ry, ryaw_start)) return false;
 
-    move_group_->setStartStateToCurrentState();
-    std::vector<std::string> names  = move_group_->getJointNames();
-    std::vector<double>      values = move_group_->getCurrentJointValues();
-
-    for (size_t i = 0; i < names.size() && i < values.size(); ++i) {
-      state[names[i]] = values[i];
-    }
-    return state;
-  }
-
-  bool restore_arm_joint_state(const std::map<std::string, double> &saved_state)
-  {
-    if (!move_group_ || saved_state.empty()) return false;
-
-    RCLCPP_INFO(get_logger(), "Restoring arm to pre-track_target_once joint state");
-
-    move_group_->setStartStateToCurrentState();
-    if (!move_group_->setJointValueTarget(saved_state)) {
-      RCLCPP_ERROR(get_logger(), "Failed to set joint value target for state restore");
-      return false;
-    }
-
-    moveit::planning_interface::MoveGroupInterface::Plan plan;
-    auto code = move_group_->plan(plan);
-    if (code != moveit::core::MoveItErrorCode::SUCCESS) {
-      RCLCPP_WARN(get_logger(), "No plan found to restore joint state (error %d)", code.val);
-      return false;
-    }
-
-    auto exec_code = move_group_->execute(plan);
-    if (exec_code != moveit::core::MoveItErrorCode::SUCCESS) {
-      RCLCPP_WARN(get_logger(), "Execution to restore joint state failed (error %d)", exec_code.val);
-      return false;
-    }
-    return true;
-  }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-  bool reposition_second_check(double &targetx, double &targety)
-{
-  if (!tf_buffer_ || !move_group_) {
-    return false;
-  }
-
-  // How much to pitch down per step
-  const double delta_rad = 10.0 * M_PI / 180.0;   // 5 degrees
-  const int max_steps = 3;                       // 0,5,10,...,35 deg down (tune)
-
-  // Get current camera pose in arm base frame
-  geometry_msgs::msg::TransformStamped base_T_cam;
-  try {
-    base_T_cam = tf_buffer_->lookupTransform(
-      arm_base_frame_,   // target frame
-      cam_link_,         // source frame
-      tf2::TimePointZero);
-  } catch (const tf2::TransformException &ex) {
-    RCLCPP_WARN(get_logger(), "TF lookup failed (%s -> %s): %s",
-                arm_base_frame_.c_str(), cam_link_.c_str(), ex.what());
-    return false;
-  }
-
-  // Current camera position
-  geometry_msgs::msg::Pose cam_pose;
-  cam_pose.position.x = base_T_cam.transform.translation.x;
-  cam_pose.position.y = base_T_cam.transform.translation.y;
-  cam_pose.position.z = base_T_cam.transform.translation.z;
-
-  // Current camera orientation
-  tf2::Quaternion q_cur;
-  tf2::fromMsg(base_T_cam.transform.rotation, q_cur);
-  q_cur.normalize();
-
-  tf2::Matrix3x3 R_cur(q_cur);
-
-  // In YOUR code you define camera X axis as "from camera to target", so treat +X as forward
-  tf2::Vector3 fwd = R_cur * tf2::Vector3(1.0, 0.0, 0.0);
-
-  // Compute yaw/pitch from forward vector in base frame (base: x forward, y left, z up)
-  const double yaw   = std::atan2(fwd.y(), fwd.x());
-  const double pitch = std::atan2(-fwd.z(), std::hypot(fwd.x(), fwd.y()));
-
-  // Preserve roll from current orientation (optional but helps avoid “camera twist”)
-  double roll_cur, pitch_cur, yaw_cur;
-  R_cur.getRPY(roll_cur, pitch_cur, yaw_cur);
-
-  // Try increasingly downward pitches
-  for (int k = 0; k < max_steps; ++k) {
-    const double pitch_new = pitch + k * delta_rad;  // more downward each step
-    RCLCPP_WARN(get_logger(), "Entering Second check loop");
-    tf2::Quaternion q_new;
-    q_new.setRPY(roll_cur, pitch_new, yaw);
-    q_new.normalize();
-    cam_pose.orientation = tf2::toMsg(q_new);
-
-    geometry_msgs::msg::Pose ee_pose;
-    if (!cameraPoseToEePoseInBase(cam_pose, ee_pose)) {
-      RCLCPP_WARN(get_logger(), "cameraPoseToEePoseInBase failed; cannot reposition");
-      return false;
-    }
+    double yaw_goal = normalize_angle(ryaw_start + delta_rad);
 
     RCLCPP_INFO(get_logger(),
-                "Reposition pitch-down step %d: pitch=%.3f rad (was %.3f), yaw=%.3f",
-                k, pitch_new, pitch, yaw);
+                "[LocalRecovery] rotating base_link by %.1f deg (start yaw=%.3f, goal yaw=%.3f)",
+                delta_rad * 180.0 / M_PI, ryaw_start, yaw_goal);
 
-    if (!move_arm_to_pose(ee_pose)) {
-      RCLCPP_WARN(get_logger(), "move_arm_to_pose failed at step %d", k);
-      continue;
+    rclcpp::Rate rate(20.0);
+    while (rclcpp::ok()) {
+      double rx2, ry2, ryaw;
+      if (!get_robot_pose_odom(rx2, ry2, ryaw)) return false;
+
+      double err = normalize_angle(yaw_goal - ryaw);
+      if (std::fabs(err) < yaw_tolerance_rad_) {
+        RCLCPP_INFO(get_logger(), "[LocalRecovery] rotation complete, yaw=%.3f", ryaw);
+        break;
+      }
+
+      geometry_msgs::msg::Twist cmd;
+      cmd.angular.z = (err > 0.0) ? ang_speed : -ang_speed;
+      cmd_vel_pub_->publish(cmd);
+      rate.sleep();
     }
 
-    rclcpp::sleep_for(50ms);
-
-    if (call_detect_target(0.6, targetx, targety)) {
-      return true;
-    }
+    geometry_msgs::msg::Twist stop;
+    cmd_vel_pub_->publish(stop);
+    return true;
   }
 
-  return false;
-}
+  // === Full scan sweep (Detection phase, single-target) =====================
+  // Runs one full wrist-level x waist sweep. On each raw detection, verifies via
+  // track_target_once; on verify success fills target_x_odom/y_odom and returns
+  // true immediately. On verify failure, restores joint state and resumes the
+  // sweep from the next step. Returns false if the sweep completes with nothing
+  // verified.
+  bool run_full_scan_sweep(
+    const std::shared_ptr<ScanGoalHandle> &goal_handle,
+    std::shared_ptr<const ScanArea::Goal> goal,
+    double &target_x_odom, double &target_y_odom,
+    double &x_base_det, double &y_base_det)
+  {
+    int steps = goal->num_steps;
+    if (steps <= 1) steps = 2;
 
+    double start_angle = goal->start_angle;
+    double end_angle    = goal->end_angle;
+    double step         = (end_angle - start_angle) / static_cast<double>(steps - 1);
 
+    auto feedback = std::make_shared<ScanArea::Feedback>();
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
- // === Core Scan implementation =============================================
-void execute_scan(const std::shared_ptr<ScanGoalHandle> goal_handle)
-{
-  auto goal = goal_handle->get_goal();
-  auto result = std::make_shared<ScanArea::Result>();
-  result->found  = false;
-  result->x_base = 0.0f;
-  result->y_base = 0.0f;
-
-  init_move_group_if_needed();
-  init_detect_client_if_needed();
-  init_nav2_client_if_needed();
-  init_track_client_if_needed();
-
-  if (!move_group_) {
-    RCLCPP_ERROR(get_logger(), "MoveGroupInterface not initialized; aborting scan.");
-    goal_handle->abort(result);
-    return;
-  }
-
-  int steps = goal->num_steps;
-  if (steps <= 1) {
-    RCLCPP_WARN(get_logger(), "num_steps <= 1; adjusting to 2");
-    steps = 2;
-  }
-  bool complete_success = false;
-  double start_angle = goal->start_angle;
-  double end_angle   = goal->end_angle;
-  double step        = (end_angle - start_angle) / static_cast<double>(steps - 1);
-
-  auto  feedback     = std::make_shared<ScanArea::Feedback>();
-
-  const int max_loops = 2;
-
-  for (int loop = 0; loop < max_loops; ++loop){
-    if (!move_arm_to_search_pose()) {
-      RCLCPP_WARN(get_logger(), "Could not move into search pose");
-      goal_handle->abort(result);
-      return;
-  }
-    bool  initial_found = false;
-    double x_base_det  = 0.0;
-    double y_base_det  = 0.0;
-
-    
-
-    // === Initial scan with vertical wrist levels + horizontal sweep =========
-    //
-    // Approximate "Search" wrist angle – tune this as needed.
-    double search_wrist_angle = 1.75;  
-
-    const int    max_levels  = 3;
-    const double delta_rad   = 20.0 * M_PI / 180.0;   // 10 degrees
+    double search_wrist_angle = 1.75;
+    const int    max_levels = 3;
+    const double delta_rad  = 20.0 * M_PI / 180.0;
     const double offsets[max_levels] = { +delta_rad, 0.0, -delta_rad };
+
     int iteration = 0;
-    for (int level = 0; level < max_levels && !initial_found; ++level) {
+    for (int level = 0; level < max_levels; ++level) {
       double wrist_angle = search_wrist_angle + offsets[level];
 
       RCLCPP_INFO(get_logger(),
-                  "Initial scan: level %d, moving wrist '%s' to %.3f rad "
-                  "(Search %.3f + offset %.3f)",
-                  level, wrist_joint_name_.c_str(),
-                  wrist_angle, search_wrist_angle, offsets[level]);
+                  "Initial scan: level %d, moving wrist '%s' to %.3f rad",
+                  level, wrist_joint_name_.c_str(), wrist_angle);
 
       if (!move_wrist_to(wrist_angle)) {
-        RCLCPP_WARN(get_logger(),
-                    "Could not move wrist to level %d; skipping this level",
-                    level);
+        RCLCPP_WARN(get_logger(), "Could not move wrist to level %d; skipping", level);
         continue;
       }
 
-      // Horizontal sweep at this wrist angle
-      
-
-      RCLCPP_WARN(get_logger(),
-            "iteration: %d",
-             iteration);
-
       for (int i = 0; i < steps; ++i) {
-        double angle = 0.0;
-        if(iteration%2==0){
-          angle = start_angle + step * static_cast<double>(i);
-        }
-        else{
-          angle = end_angle - step * static_cast<double>(i);
-        }
+        double angle = (iteration % 2 == 0)
+          ? start_angle + step * static_cast<double>(i)
+          : end_angle   - step * static_cast<double>(i);
+
         feedback->current_angle = static_cast<float>(angle);
-
-
-        // Progress across all levels
         feedback->progress = static_cast<float>(
           100.0 * (static_cast<double>(i + level * steps) /
-                  static_cast<double>(max_levels * steps - 1)));
+                   static_cast<double>(max_levels * steps - 1)));
         goal_handle->publish_feedback(feedback);
 
         if (goal_handle->is_canceling()) {
-          RCLCPP_INFO(get_logger(), "ScanArea goal canceled");
-          move_arm_to_stow_pose();
-          goal_handle->canceled(result);
-          return;
+          return false;
         }
 
-        RCLCPP_INFO(get_logger(),
-                    "Initial scan: level %d, moving base joint '%s' to angle %.3f rad",
-                    level, base_joint_name_.c_str(), angle);
-
         if (!move_base_to(angle)) {
-          RCLCPP_WARN(get_logger(), "Planning failed for this step, skipping.");
+          RCLCPP_WARN(get_logger(), "Joint move failed for this step, skipping.");
           continue;
         }
 
         rclcpp::sleep_for(40ms);
 
         double xb, yb;
-        bool found = call_detect_target(goal->min_confidence, xb, yb);
-        if (found) {
-          RCLCPP_INFO(get_logger(),
-                      "Initial detection at level %d: (%.2f, %.2f) in arm base frame",
-                      level, xb, yb);
+        if (!call_detect_target(goal->min_confidence, xb, yb)) {
+          continue;
+        }
 
-              // Transform initial detection to MAP to get target world pose
-          if (!tf_buffer_) {
-            RCLCPP_ERROR(get_logger(), "TF buffer not initialized");
-            move_arm_to_stow_pose();
-            goal_handle->abort(result);
-            return;
-          }
+        RCLCPP_INFO(get_logger(), "Raw detection at level %d: (%.2f, %.2f) arm base frame",
+                    level, xb, yb);
 
-          geometry_msgs::msg::PoseStamped det_arm;
-          det_arm.header.frame_id = arm_base_frame_;
-          det_arm.header.stamp    = this->now();
-          det_arm.pose.position.x = xb;
-          det_arm.pose.position.y = yb;
-          det_arm.pose.position.z = 0.0;
-          det_arm.pose.orientation.w = 1.0;
+        if (!tf_buffer_) {
+          RCLCPP_ERROR(get_logger(), "TF buffer not initialized");
+          return false;
+        }
 
-          geometry_msgs::msg::PoseStamped det_map;
-          try {
-            det_map = tf_buffer_->transform(det_arm, "map", tf2::durationFromSec(0.5));
-          }
-          catch (const tf2::TransformException & ex) {
-            RCLCPP_WARN(get_logger(), "Transform %s->map failed: %s",
-                        arm_base_frame_.c_str(), ex.what());
-            move_arm_to_stow_pose();
-            goal_handle->abort(result);
-            return;
-          }
+        geometry_msgs::msg::PoseStamped det_arm;
+        det_arm.header.frame_id = arm_base_frame_;
+        det_arm.header.stamp    = this->now();
+        det_arm.pose.position.x = xb;
+        det_arm.pose.position.y = yb;
+        det_arm.pose.position.z = 0.0;
+        det_arm.pose.orientation.w = 1.0;
 
-          double target_x_map = det_map.pose.position.x;
-          double target_y_map = det_map.pose.position.y;
+        geometry_msgs::msg::PoseStamped det_odom;
+        try {
+          det_odom = tf_buffer_->transform(det_arm, "odom", tf2::durationFromSec(0.5));
+        }
+        catch (const tf2::TransformException & ex) {
+          RCLCPP_WARN(get_logger(), "Transform %s->odom failed: %s",
+                      arm_base_frame_.c_str(), ex.what());
+          continue;
+        }
 
-          std::map<std::string, double> pre_track_joint_state = capture_arm_joint_state();
+        double cand_x_odom = det_odom.pose.position.x;
+        double cand_y_odom = det_odom.pose.position.y;
 
-                      
-          track_target_once(target_x_map, target_y_map);
+        auto pre_state = capture_arm_joint_state();
+        track_target_once(cand_x_odom, cand_y_odom);
 
-          double x_base,y_base;
-          if(!call_detect_target(goal->min_confidence, x_base, y_base)){
-            restore_arm_joint_state(pre_track_joint_state);
-            continue;
-          }
+        double xb_verify, yb_verify;
+        if (call_detect_target(goal->min_confidence, xb_verify, yb_verify)) {
+          target_x_odom = cand_x_odom;
+          target_y_odom = cand_y_odom;
+          x_base_det = xb_verify;
+          y_base_det = yb_verify;
+          return true;
+        }
 
-          initial_found = true;
-          x_base_det    = (xb);
-          y_base_det    = (yb);
-          break;  // break inner loop; outer sees initial_found and stops too
-        };
+        RCLCPP_INFO(get_logger(), "Verification failed; restoring pose and resuming sweep");
+        restore_arm_joint_state(pre_state);
       }
       iteration += 1;
     }
 
-    // If nothing was found at any wrist + base angle
-    if (!initial_found) {
-      RCLCPP_INFO(get_logger(), "No target found in initial scan");
-      move_arm_to_stow_pose();
-      goal_handle->succeed(result);  // result->found stays false
-      return;
+    return false;
+  }
+
+  // === Local recovery search =================================================
+  // Rotates base_link to clear the GPS horn, aims the arm at the last known
+  // odom-frame target position, then sweeps waist +/-15 deg across 3 wrist
+  // angle levels (+/-10 deg from center) looking for the target.
+  bool run_local_recovery_search(double min_confidence, double &xb_out, double &yb_out)
+  {
+    move_arm_to_stow_pose();
+    rotate_base_link_relative(local_recovery_rotation_deg_ * M_PI / 180.0);
+
+    if (!track_target_once(last_known_x_odom_, last_known_y_odom_)) {
+      RCLCPP_WARN(get_logger(), "[LocalRecovery] failed to aim arm at last known position");
+      return false;
     }
 
-    // We have an initial detection in arm base frame
-    result->found  = true;
-    result->x_base = static_cast<float>(x_base_det);
-    result->y_base = static_cast<float>(y_base_det);
-
-    // Transform initial detection to MAP to get target world pose
-    if (!tf_buffer_) {
-      RCLCPP_ERROR(get_logger(), "TF buffer not initialized");
-      move_arm_to_stow_pose();
-      goal_handle->abort(result);
-      return;
+    double center_waist, center_wrist;
+    if (!get_joint_position(base_joint_name_, center_waist) ||
+        !get_joint_position(wrist_joint_name_, center_wrist)) {
+      RCLCPP_WARN(get_logger(), "[LocalRecovery] could not read current waist/wrist state");
+      return false;
     }
 
-    geometry_msgs::msg::PoseStamped det_arm;
-    det_arm.header.frame_id = arm_base_frame_;
-    det_arm.header.stamp    = this->now();
-    det_arm.pose.position.x = x_base_det;
-    det_arm.pose.position.y = y_base_det;
-    det_arm.pose.position.z = 0.0;
-    det_arm.pose.orientation.w = 1.0;
+    const double wrist_delta = local_recovery_wrist_delta_deg_ * M_PI / 180.0;
+    const double wrist_offsets[3] = { +wrist_delta, 0.0, -wrist_delta };
 
-    geometry_msgs::msg::PoseStamped det_map;
-    try {
-      det_map = tf_buffer_->transform(det_arm, "map", tf2::durationFromSec(0.5));
-    }
-    catch (const tf2::TransformException & ex) {
-      RCLCPP_WARN(get_logger(), "Transform %s->map failed: %s",
-                  arm_base_frame_.c_str(), ex.what());
-      move_arm_to_stow_pose();
-      goal_handle->abort(result);
-      return;
-    }
+    const double waist_range = local_recovery_waist_range_deg_ * M_PI / 180.0;
+    const int    waist_steps = std::max(2, local_recovery_waist_steps_);
+    const double waist_step  = (2.0 * waist_range) / static_cast<double>(waist_steps - 1);
 
-    double target_x_map = det_map.pose.position.x;
-    double target_y_map = det_map.pose.position.y;
-
-    // === Phase A: Nav2 + arm tracking to ~desired_dist_ ======================
-    // Track once before stepping
-
-    while (initial_found == true) {
-      double rx, ry, ryaw;
-      if (!get_robot_pose_map(rx, ry, ryaw)) {
-        break;
-      }
-      double dx = target_x_map - rx;
-      double dy = target_y_map - ry;
-      double dist = std::sqrt(dx*dx + dy*dy);
-      
-
-      RCLCPP_INFO(get_logger(),
-                  "[Phase A] loop %d: dist to target = %.3f m", loop, dist);
-
-      if (dist <= desired_dist_ + desired_dist_tol_) {
-        RCLCPP_INFO(get_logger(),
-                    "Reached ~%.2f m from target; Phase A complete", desired_dist_);
-        break;
+    for (int level = 0; level < 3; ++level) {
+      double wrist_target = center_wrist + wrist_offsets[level];
+      if (!move_wrist_to(wrist_target)) {
+        RCLCPP_WARN(get_logger(), "[LocalRecovery] wrist move failed at level %d", level);
+        continue;
       }
 
+      for (int i = 0; i < waist_steps; ++i) {
+        double waist_target = (center_waist - waist_range) + waist_step * static_cast<double>(i);
 
-      move_arm_to_stow_pose();
-        
-      // Step Nav2 toward the target; arm tracking runs inside step_nav2_towards_target
-      if (!step_nav2_towards_target(target_x_map, target_y_map,
-                                    desired_dist_, desired_dist_tol_)) {
-        RCLCPP_WARN(get_logger(), "Nav2 step failed; stopping Phase A");
-        break;
-      }
-      
-      track_target_once(target_x_map,target_y_map);
+        if (!move_base_to(waist_target)) {
+          continue;
+        }
 
-      // Re-acquire target with YOLO; if lost, I should reattempt after some slight wrist and waist adjustments
-      rclcpp::sleep_for(100ms);
+        rclcpp::sleep_for(40ms);
 
-      double xb_new, yb_new;
-      bool found_again = call_detect_target(goal->min_confidence, xb_new, yb_new);
-      if (!found_again) {
-
-          if(!reposition_second_check(xb_new,yb_new)){
-            RCLCPP_WARN(get_logger(),
-              "Target lost after Nav2 move; ending scan action (found initially = true)");
-            initial_found = false;
-            continue;
+        double xb, yb;
+        if (call_detect_target(min_confidence, xb, yb)) {
+          RCLCPP_INFO(get_logger(),
+                      "[LocalRecovery] reacquired at wrist level %d, waist %.3f rad",
+                      level, waist_target);
+          xb_out = xb;
+          yb_out = yb;
+          return true;
         }
       }
-
-      // Update result base-frame coordinates
-      result->x_base = static_cast<float>(xb_new);
-      result->y_base = static_cast<float>(yb_new);
-
-      // Update target map pose using new detection (better accuracy)
-      det_arm.header.stamp    = this->now();
-      det_arm.pose.position.x = xb_new;
-      det_arm.pose.position.y = yb_new;
-
-      try {
-        det_map = tf_buffer_->transform(det_arm, "map", tf2::durationFromSec(0.5));
-        target_x_map = det_map.pose.position.x;
-        target_y_map = det_map.pose.position.y;
-      }
-      catch (const tf2::TransformException & ex) {
-        RCLCPP_WARN(get_logger(), "Transform %s->map (refine) failed: %s",
-                    arm_base_frame_.c_str(), ex.what());
-        // keep old target_x_map / target_y_map
-      }
     }
 
-    // === Phase B: side-on final approach with cmd_vel + tracking =============
-    while (initial_found == true){
-      double rx, ry, ryaw;
+    return false;
+  }
 
-      if (!get_robot_pose_map(rx, ry, ryaw)) {
-        RCLCPP_WARN(get_logger(), "[Phase B] failed to get robot pose; retrying");
-        rclcpp::sleep_for(100ms);
-        continue;  // or break; depending on what you want
-      }
+  // === Core Scan implementation (FSM dispatch) ===============================
 
+  void execute_scan(const std::shared_ptr<ScanGoalHandle> goal_handle)
+  {
+    auto goal = goal_handle->get_goal();
+    auto result = std::make_shared<ScanArea::Result>();
+    result->found  = false;
+    result->x_base = 0.0f;
+    result->y_base = 0.0f;
 
-      double dx = target_x_map - rx;
-      double dy = target_y_map - ry;
-      double dist = std::sqrt(dx*dx + dy*dy);
-    
-      if(dist <= side_offset_){
-        RCLCPP_INFO(get_logger(), " [Phase B] target is within desired distance. Arm search complete");
-        complete_success = true;
-        break;
-      }
-      double movement_distance = 0.0;
-      if(!determine_angle_offset(target_x_map,target_y_map,movement_distance)){
-        RCLCPP_INFO(get_logger(), " [Phase B] rotation failed restarting");
-        break;
-      }
-      if(!drive_forward_to_side_offset(target_x_map,target_y_map,movement_distance)){
-        RCLCPP_INFO(get_logger(), " [Phase B] forawrd failed restarting");
-        break;
-      }
-      track_target_once(target_x_map,target_y_map);
+    init_move_group_if_needed();
+    init_detect_client_if_needed();
+    init_nav2_client_if_needed();
+    init_track_client_if_needed();
 
-      // 3) Optionally re-check with YOLO (if lost, caller can trigger a new scan)
-      double xb_final, yb_final;
-      if (!call_detect_target(goal->min_confidence, xb_final, yb_final)) {
-        RCLCPP_WARN(get_logger(),
-                    "[Phase B] target lost in final pose; restarting search");
-        initial_found = false;
-        continue;
-      } else {
-        result->x_base = static_cast<float>(xb_final);
-        result->y_base = static_cast<float>(yb_final);
-        RCLCPP_INFO(get_logger(),
-                    "[Phase B] final YOLO detection at (%.2f, %.2f) in arm base frame",
-                    xb_final, yb_final);
-        complete_success = true;
-      }
+    if (!move_group_) {
+      RCLCPP_ERROR(get_logger(), "MoveGroupInterface not initialized; aborting scan.");
+      goal_handle->abort(result);
+      return;
     }
-    if(complete_success){
-      break;
+
+    ScanContext ctx;
+    ctx.max_sweeps_effective = max_sweeps_;
+
+    ScanState state = ScanState::FULL_SCAN;
+
+    while (rclcpp::ok()) {
+
+      if (goal_handle->is_canceling()) {
+        move_arm_to_stow_pose();
+        goal_handle->canceled(result);
+        return;
+      }
+
+      switch (state) {
+
+        // --------------------------------------------------------------
+        case ScanState::FULL_SCAN: {
+          ctx.sweep_count++;
+          RCLCPP_INFO(get_logger(), "[FULL_SCAN] sweep #%d (max_effective=%d)",
+                      ctx.sweep_count, ctx.max_sweeps_effective);
+
+          if (!move_arm_to_search_pose()) {
+            RCLCPP_WARN(get_logger(), "Could not move into search pose");
+            state = ScanState::ABORTED;
+            break;
+          }
+
+          double tx, ty, xb, yb;
+          bool verified = run_full_scan_sweep(goal_handle, goal, tx, ty, xb, yb);
+
+          if (goal_handle->is_canceling()) {
+            move_arm_to_stow_pose();
+            goal_handle->canceled(result);
+            return;
+          }
+
+          if (verified) {
+            ctx.target_x_odom = tx;
+            ctx.target_y_odom = ty;
+            ctx.x_base_last = xb;
+            ctx.y_base_last = yb;
+
+            last_known_x_odom_ = tx;
+            last_known_y_odom_ = ty;
+            has_last_known_position_ = true;
+
+            ctx.max_sweeps_effective = 5;
+
+            result->found  = true;
+            result->x_base = static_cast<float>(xb);
+            result->y_base = static_cast<float>(yb);
+
+            state = ScanState::EVALUATE_DISTANCE;
+          } else {
+            state = (ctx.sweep_count < ctx.max_sweeps_effective)
+                      ? ScanState::FULL_SCAN
+                      : ScanState::ABORTED;
+          }
+          break;
+        }
+
+        // --------------------------------------------------------------
+        case ScanState::EVALUATE_DISTANCE: {
+          double rx, ry, ryaw;
+          if (!get_robot_pose_odom(rx, ry, ryaw)) {
+            RCLCPP_WARN(get_logger(), "[EVALUATE_DISTANCE] failed to get robot pose");
+            state = ScanState::ABORTED;
+            break;
+          }
+
+          double dx = ctx.target_x_odom - rx;
+          double dy = ctx.target_y_odom - ry;
+          ctx.current_distance_to_target = std::sqrt(dx*dx + dy*dy);
+
+          RCLCPP_INFO(get_logger(), "[EVALUATE_DISTANCE] dist=%.3f m (nav2_switch=%.2f, final=%.2f)",
+                      ctx.current_distance_to_target, nav2_switch_distance_, desired_final_distance_);
+
+          if (ctx.current_distance_to_target > nav2_switch_distance_) {
+            state = ScanState::NAV2_APPROACH;
+          } else if (ctx.current_distance_to_target > desired_final_distance_) {
+            state = ScanState::VELOCITY_APPROACH;
+          } else {
+            state = ScanState::FINAL_INSPECTION;
+          }
+          break;
+        }
+
+        // --------------------------------------------------------------
+        case ScanState::NAV2_APPROACH: {
+          move_arm_to_stow_pose();
+
+          double goal_dist = nav2_switch_distance_ - nav2_approach_margin_;
+          if (goal_dist < 0.0) goal_dist = 0.0;
+
+          if (!step_nav2_towards_target(ctx.target_x_odom, ctx.target_y_odom, goal_dist, 0.0)) {
+            RCLCPP_WARN(get_logger(), "[NAV2_APPROACH] Nav2 step failed");
+            state = ScanState::LOCAL_RECOVERY;
+            break;
+          }
+
+          double xb, yb;
+          if (track_target_once(ctx.target_x_odom, ctx.target_y_odom) &&
+              call_detect_target(goal->min_confidence, xb, yb)) {
+            ctx.x_base_last = xb;
+            ctx.y_base_last = yb;
+            result->x_base = static_cast<float>(xb);
+            result->y_base = static_cast<float>(yb);
+            state = ScanState::EVALUATE_DISTANCE;
+          } else {
+            state = ScanState::LOCAL_RECOVERY;
+          }
+          break;
+        }
+
+        // --------------------------------------------------------------
+        case ScanState::VELOCITY_APPROACH: {
+          move_arm_to_stow_pose();
+
+          double move_dist = 0.0;
+          bool ok = determine_angle_offset(ctx.target_x_odom, ctx.target_y_odom, move_dist)
+                 && drive_forward_to_side_offset(ctx.target_x_odom, ctx.target_y_odom, move_dist);
+
+          if (!ok) {
+            RCLCPP_WARN(get_logger(), "[VELOCITY_APPROACH] rotate/drive failed");
+            state = ScanState::LOCAL_RECOVERY;
+            break;
+          }
+
+          double xb, yb;
+          if (track_target_once(ctx.target_x_odom, ctx.target_y_odom) &&
+              call_detect_target(goal->min_confidence, xb, yb)) {
+            ctx.x_base_last = xb;
+            ctx.y_base_last = yb;
+            result->x_base = static_cast<float>(xb);
+            result->y_base = static_cast<float>(yb);
+            state = ScanState::EVALUATE_DISTANCE;
+          } else {
+            state = ScanState::LOCAL_RECOVERY;
+          }
+          break;
+        }
+
+        // --------------------------------------------------------------
+        case ScanState::LOCAL_RECOVERY: {
+          double xb, yb;
+          if (run_local_recovery_search(goal->min_confidence, xb, yb)) {
+            geometry_msgs::msg::PoseStamped det_arm;
+            det_arm.header.frame_id = arm_base_frame_;
+            det_arm.header.stamp    = this->now();
+            det_arm.pose.position.x = xb;
+            det_arm.pose.position.y = yb;
+            det_arm.pose.orientation.w = 1.0;
+
+            try {
+              auto det_odom = tf_buffer_->transform(det_arm, "odom", tf2::durationFromSec(0.5));
+              ctx.target_x_odom = det_odom.pose.position.x;
+              ctx.target_y_odom = det_odom.pose.position.y;
+              last_known_x_odom_ = ctx.target_x_odom;
+              last_known_y_odom_ = ctx.target_y_odom;
+            }
+            catch (const tf2::TransformException & ex) {
+              RCLCPP_WARN(get_logger(), "[LocalRecovery] transform to odom failed: %s", ex.what());
+            }
+
+            ctx.x_base_last = xb;
+            ctx.y_base_last = yb;
+            result->x_base = static_cast<float>(xb);
+            result->y_base = static_cast<float>(yb);
+
+            state = ScanState::EVALUATE_DISTANCE;
+          } else {
+            RCLCPP_WARN(get_logger(), "[LocalRecovery] exhausted, returning to FULL_SCAN");
+            state = ScanState::FULL_SCAN;
+          }
+          break;
+        }
+
+        // --------------------------------------------------------------
+        case ScanState::FINAL_INSPECTION: {
+          track_target_once(ctx.target_x_odom, ctx.target_y_odom);
+
+          double xb, yb;
+          if (call_detect_target(goal->min_confidence, xb, yb)) {
+            result->x_base = static_cast<float>(xb);
+            result->y_base = static_cast<float>(yb);
+          }
+          result->found = true;
+
+          state = ScanState::COMPLETE;
+          break;
+        }
+
+        // --------------------------------------------------------------
+        case ScanState::COMPLETE: {
+          RCLCPP_INFO(get_logger(), "Scan complete: target at (%.3f, %.3f) odom",
+                      ctx.target_x_odom, ctx.target_y_odom);
+          rclcpp::sleep_for(200ms);
+          move_arm_to_stow_pose();
+          goal_handle->succeed(result);
+          return;
+        }
+
+        // --------------------------------------------------------------
+        case ScanState::ABORTED: {
+          if (has_last_known_position_) {
+            RCLCPP_WARN(get_logger(),
+                        "Scan aborted. Last known target position: (%.3f, %.3f) odom",
+                        last_known_x_odom_, last_known_y_odom_);
+          } else {
+            RCLCPP_WARN(get_logger(), "Scan aborted. No target ever detected.");
+          }
+          move_arm_to_stow_pose();
+          goal_handle->abort(result);
+          return;
+        }
+      }
     }
   }
-  // Stow the arm at the end of the whole procedure
-  // move_arm_to_stow_pose();
-  if(!complete_success){
-    move_arm_to_stow_pose();
-  }
-  rclcpp::sleep_for(200ms);
-
-  move_arm_to_stow_pose(); //remove this once picture taking implementation is in place!
-  
-  goal_handle->succeed(result);
-}
-
-
-
-
-  
 
   // === Members ===============================================================
   std::string wrist_joint_name_;
@@ -1440,8 +1391,41 @@ void execute_scan(const std::shared_ptr<ScanGoalHandle> goal_handle)
   std::string arm_base_frame_;
   std::string ee_link_;
   std::string cam_link_;
+
   std::mutex joint_state_mutex_;
   std::map<std::string, double> latest_joint_positions_;
+
+  double start_angle_;
+  double end_angle_;
+  int    num_steps_;
+
+  double camera_height_;
+  double radius_min_;
+  double radius_max_;
+  double radius_scale_factor_;
+
+  double side_offset_;
+  double yaw_tolerance_rad_{0.05};
+
+  double joint_move_tolerance_;
+  double joint_move_timeout_;
+  double joint_poll_rate_hz_;
+
+  // FSM tunables
+  int    max_sweeps_;
+  double desired_final_distance_;
+  double nav2_switch_distance_;
+  double nav2_approach_margin_;
+
+  double local_recovery_rotation_deg_;
+  double local_recovery_waist_range_deg_;
+  int    local_recovery_waist_steps_;
+  double local_recovery_wrist_delta_deg_;
+
+  // Last known target position (odom frame), persists across sweeps/aborts
+  double last_known_x_odom_ = 0.0;
+  double last_known_y_odom_ = 0.0;
+  bool   has_last_known_position_ = false;
 
   ScanServer::SharedPtr scan_server_;
 
@@ -1456,25 +1440,6 @@ void execute_scan(const std::shared_ptr<ScanGoalHandle> goal_handle)
   rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_pub_;
   rclcpp::Publisher<interbotix_xs_msgs::msg::JointSingleCommand>::SharedPtr joint_single_pub_;
   rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_state_sub_;
-
-  double joint_move_tolerance_;   // rad
-  double joint_move_timeout_;     // sec, max wait
-  double joint_poll_rate_hz_;
-
-  double start_angle_;
-  double end_angle_;
-  int    num_steps_;
-
-  double camera_height_;
-  double radius_min_;
-  double radius_max_;
-  double radius_scale_factor_;
-
-  double desired_dist_;
-  double desired_dist_tol_;
-  double side_offset_;
-  double yaw_tolerance_rad_{0.05};
-
 };
 
 int main(int argc, char** argv)
@@ -1489,6 +1454,3 @@ int main(int argc, char** argv)
   rclcpp::shutdown();
   return 0;
 }
-
-
-
