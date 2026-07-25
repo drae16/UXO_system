@@ -51,12 +51,21 @@ ament_target_dependencies(track_target
   tf2_geometry_msgs
 )
 
+add_executable(gps_gate_node src/gps_gate_node.cpp)
+ament_target_dependencies(
+  gps_gate_node 
+  rclcpp 
+  nav_msgs 
+  std_srvs
+  )
+
 rosidl_target_interfaces(track_target
   ${PROJECT_NAME} "rosidl_typesupport_cpp")
   
 install(TARGETS 
   arm_search
   track_target
+  gps_gate_node
   DESTINATION lib/${PROJECT_NAME})
  
  install(

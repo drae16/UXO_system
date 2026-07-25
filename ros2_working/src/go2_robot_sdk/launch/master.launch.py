@@ -32,12 +32,6 @@ def generate_launch_description():
             output='screen',
             remappings=[('/joint_states', '/vx300s/joint_states')],
         ),
-        Node(
-            package='nav_search',
-            executable='track_target',
-            name='track_target',
-            output='screen',
-        ),
 
         Node(
             package='nav_search',
@@ -45,4 +39,13 @@ def generate_launch_description():
             name='yolo_node',
             output='screen',
         ),
+
+        Node(
+            package='nav_search',
+            executable='gps_gate_node',
+            name='yolo_node',
+            output='screen',
+        ),
+
+        
     ])
