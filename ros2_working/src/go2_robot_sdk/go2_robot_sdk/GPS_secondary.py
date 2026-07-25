@@ -2,7 +2,7 @@
 #!/usr/bin/env python3
 import math, time, threading
 from typing import Optional
-
+import csv
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
@@ -162,25 +162,21 @@ class GPSNode(Node):
             depth=100,
         )
 
-        qos_fix = QoSProfile(
-            durability=DurabilityPolicy.VOLATILE,
-            reliability=ReliabilityPolicy.RELIABLE,
-            history=HistoryPolicy.KEEP_LAST,
-            depth=100,
-        )
-
         self.current_lat: Optional[float] = None
         self.current_lon: Optional[float] = None
         
+        self.csv_path = r'/home/drl/Data'
 
-        self.sub_fix = self.create_subscription(NavSatFix, "/fix", self._cb_fix,qos_fix )
-        self.sub = self.create_subscription(Vector3, "/gps_targets", self._cb_target, qos)
+        self.sub_fix = self.create_subscription(NavSatFix, "/fix", self._cb_fix, qos )
+        self.sub = self.create_subscription(Vector3, "gps_targets", self._cb_target, qos)
 
         self.publisher_command = self.create_publisher(WebRtcReq, '/webrtc_req', 10)
         self.publisher_completion = self.create_publisher(Empty, 'input_at_waypoint/input',10)
 
 
         self.queue = []  
+        self.all_targets = []     # master record: never has entries removed
+        self._next_id = 0
 
         self._lock = threading.Lock()
         self._pos_lock = threading.Lock()
@@ -193,10 +189,41 @@ class GPSNode(Node):
         self.worker.start()
 
     def _cb_target(self, msg: Vector3):
-        with self._lock:
-            self.queue.append((msg.x, msg.y, msg.z))  # (lat, lon, yaw in radians)
-        self.get_logger().info(f"Queued waypoint: {msg.x}, {msg.y}, {msg.z}")
+        lat, lon, yaw = msg.x, msg.y, msg.z
 
+        with self._lock:
+            is_duplicate = any(
+                gps_distance(lat, lon, t["lat"], t["lon"]) <= self.duplicate_threshold
+                for t in self.all_targets
+            )
+
+            entry = {
+                "id": self._next_id,
+                "lat": lat, "lon": lon, "yaw": yaw,
+                "status": "duplicate" if is_duplicate else "queue",
+            }
+            self._next_id += 1
+            self.all_targets.append(entry)
+
+            if is_duplicate:
+                self.get_logger().info(f"Duplicate target ignored: {lat}, {lon}, {yaw}")
+            else:
+                self.queue.append(entry)
+                self.get_logger().info(f"Queued waypoint: {lat}, {lon}, {yaw}")
+
+        self._write_csv()
+    
+    def _write_csv(self):
+        with self._lock:
+            rows = sorted(self.all_targets, key=lambda t: t["id"])
+            snapshot = [(t["id"], t["status"], t["lat"], t["lon"], t["yaw"]) for t in rows]
+        try:
+            with open(self.csv_path, "w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(["id", "status", "lat", "lon", "yaw"])
+                writer.writerows(snapshot)
+        except OSError as e:
+            self.get_logger().error(f"Failed to write CSV: {e}")
 
         
     def _cb_fix(self, msg: NavSatFix):
@@ -222,7 +249,7 @@ class GPSNode(Node):
                         range(len(self.queue)),
                         key=lambda i: gps_distance(
                             cur_lat, cur_lon,
-                            self.queue[i][0], self.queue[i][1]
+                            self.queue[i]["lat"], self.queue[i]["lon"]
                         )
                     )
                     target = self.queue.pop(best_idx)
@@ -231,19 +258,21 @@ class GPSNode(Node):
                 time.sleep(0.1)
                 continue
 
-            lat, lon, yaw = target
-            pose = self._convert_gps(lat, lon, yaw)
+            pose = self._convert_gps(target["lat"], target["lon"], target["yaw"])
             if pose is None:
                 continue
 
             ok = self.navigator.go_to_pose(pose)
-
             if ok:
                 self.get_logger().info("Reached goal, running task...")
                 self.run_task_for(pose)
+                with self._lock:
+                    target["status"] = "visited"
+                self._write_csv()
             else:
                 self.get_logger().warn("Navigation failed/canceled")
-
+                with self._lock:
+                    self.queue.append(target)  # put it back, retry later
 
     def _convert_gps(self, lat: float, lon: float, yaw: float) -> Optional[PoseStamped]:
         req = FromLL.Request()
