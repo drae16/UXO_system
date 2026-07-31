@@ -2,10 +2,14 @@
 float32 min_confidence
 ---
 # Result
-bool found
+bool    found
 float32 x_base
 float32 y_base
 float32 confidence
+float32 near_x1
+float32 near_y1
+float32 near_x2
+float32 near_y2
 ---
 # Feedback
 float32 progress
