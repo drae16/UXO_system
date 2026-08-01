@@ -26,12 +26,6 @@ def generate_launch_description():
             output='screen',
             remappings=[('/joint_states', '/vx300s/joint_states')],
         ),
-        Node(
-            package='nav_search',
-            executable='track_target',
-            name='track_target',
-            output='screen',
-        ),
 
         Node(
             package='nav_search',
@@ -40,6 +34,7 @@ def generate_launch_description():
             output='screen',
         ),
 
+<<<<<<< HEAD
         IncludeLaunchDescription(PythonLaunchDescriptionSource(launch_b),
                                  launch_arguments = {
                                      'robot_model': 'vx300s',
@@ -47,4 +42,14 @@ def generate_launch_description():
                                      'use_world_frame': 'false'
                                  }.items()
                                  ),
+=======
+        Node(
+            package='nav_search',
+            executable='gps_gate_node',
+            name='yolo_node',
+            output='screen',
+        ),
+
+        
+>>>>>>> local_frame_nav_test
     ])

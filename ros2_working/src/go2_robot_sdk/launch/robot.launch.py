@@ -297,7 +297,7 @@ class Go2NodeFactory:
                 package='robot_localization',
                 executable='navsat_transform_node',
                 name='navsat_transform',
-                remappings=[("/imu", "imu/data"),
+                remappings=[("imu", "imu/data"),
                             ("gps/fix","/fix"),
                             ("odometry/filtered", "odometry/global")
                 ],
