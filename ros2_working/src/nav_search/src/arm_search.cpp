@@ -617,6 +617,31 @@ private:
     return state;
   }
 
+    bool transform_arm_point_to_base_link(double xb, double yb, double &x_bl, double &y_bl)
+  {
+    if (!tf_buffer_) return false;
+
+    geometry_msgs::msg::PoseStamped p_arm;
+    p_arm.header.frame_id = arm_base_frame_;
+    p_arm.header.stamp    = this->now();
+    p_arm.pose.position.x = xb;
+    p_arm.pose.position.y = yb;
+    p_arm.pose.position.z = 0.0;
+    p_arm.pose.orientation.w = 1.0;
+
+    try {
+      auto p_bl = tf_buffer_->transform(p_arm, "base_link", tf2::durationFromSec(0.5));
+      x_bl = p_bl.pose.position.x;
+      y_bl = p_bl.pose.position.y;
+      return true;
+    }
+    catch (const tf2::TransformException & ex) {
+      RCLCPP_WARN(get_logger(), "Transform %s->base_link failed: %s",
+                  arm_base_frame_.c_str(), ex.what());
+      return false;
+    }
+  }
+
   bool restore_arm_joint_state(const std::map<std::string, double> &saved_state)
   {
     if (!move_group_ || saved_state.empty()) return false;
@@ -936,29 +961,30 @@ private:
   // Rotation AND drive distance both widened by the target's near-edge
   // half-width, so the robot both turns further out and stops further back
   // to clear the target's physical footprint, not just its center point.
-   bool determine_angle_offset(
-    double target_x_odom, double target_y_odom,
-    double near1_x_odom, double near1_y_odom,
-    double near2_x_odom, double near2_y_odom,
+  bool determine_angle_offset(
+    double target_x_bl, double target_y_bl,
+    double near1_x_bl, double near1_y_bl,
+    double near2_x_bl, double near2_y_bl,
     double &calc_move, double ang_speed = 0.50)
   {
     double rx, ry, ryaw;
     if (!get_robot_pose_odom(rx, ry, ryaw)) {
       return false;
     }
+    double yaw0 = ryaw;  // current heading, snapshot once
 
-    double dx = target_x_odom - rx;
-    double dy = target_y_odom - ry;
-    double remain_dist = std::sqrt(dx*dx + dy*dy);
+    // Target position is already relative to base_link -- dx/dy ARE the offset
+    double remain_dist = std::sqrt(target_x_bl*target_x_bl + target_y_bl*target_y_bl);
     if (remain_dist < 1e-6) {
       calc_move = 0.0;
       return true;
     }
 
-    double theta = std::atan2(dy, dx);  // true bearing to target, no scaling
+    // Bearing to target relative to robot's CURRENT heading (0 = straight ahead)
+    double theta_rel = std::atan2(target_y_bl, target_x_bl);
 
-    double edge_dx = near2_x_odom - near1_x_odom;
-    double edge_dy = near2_y_odom - near1_y_odom;
+    double edge_dx = near2_x_bl - near1_x_bl;
+    double edge_dy = near2_y_bl - near1_y_bl;
     double edge_half_width = 0.5 * std::sqrt(edge_dx*edge_dx + edge_dy*edge_dy);
 
     const double s = side_offset_ + edge_half_width;
@@ -978,17 +1004,18 @@ private:
                 "[VelocityApproach] center_dist=%.3f, edge_half_width=%.3f, effective_offset=%.3f, move=%.3f",
                 remain_dist, edge_half_width, s, calc_move);
 
-    double yaw_left  = normalize_angle(theta - angle_to_goal);
-    double yaw_right = normalize_angle(theta + angle_to_goal);
+    // Two candidate ABSOLUTE headings, built from current yaw + relative bearing
+    double yaw_left  = normalize_angle(yaw0 + theta_rel - angle_to_goal);
+    double yaw_right = normalize_angle(yaw0 + theta_rel + angle_to_goal);
 
-    double err_left  = normalize_angle(yaw_left  - ryaw);
-    double err_right = normalize_angle(yaw_right - ryaw);
+    double err_left  = normalize_angle(yaw_left  - yaw0);
+    double err_right = normalize_angle(yaw_right - yaw0);
 
     double yaw_goal = (std::fabs(err_left) < std::fabs(err_right)) ? yaw_left : yaw_right;
 
     RCLCPP_INFO(get_logger(),
-                "[VelocityApproach] rotate: theta_to_target=%.3f, yaw_goal=%.3f",
-                theta, yaw_goal);
+                "[VelocityApproach] rotate: theta_rel=%.3f, yaw0=%.3f, yaw_goal=%.3f",
+                theta_rel, yaw0, yaw_goal);
 
     rclcpp::Rate rate(20.0);
     while (rclcpp::ok()) {
@@ -1011,21 +1038,14 @@ private:
     return true;
   }
 
-  bool drive_forward_to_side_offset(double target_x_odom, double target_y_odom, double move_dist, double forward_speed = 0.3)
+  bool drive_forward_to_side_offset(double target_x_bl, double target_y_bl, double move_dist, double forward_speed = 0.3)
   {
     if (!cmd_vel_pub_) {
       RCLCPP_WARN(get_logger(), "cmd_vel publisher not initialized for VelocityApproach drive");
       return false;
     }
 
-    double rx0, ry0, yaw0;
-    if (!get_robot_pose_odom(rx0, ry0, yaw0)) {
-      return false;
-    }
-
-    double dx = target_x_odom - rx0;
-    double dy = target_y_odom - ry0;
-    double dist = std::sqrt(dx*dx + dy*dy);
+    double dist = std::sqrt(target_x_bl*target_x_bl + target_y_bl*target_y_bl);
     if (dist < side_offset_ + 0.05) {
       RCLCPP_INFO(get_logger(),
                   "[VelocityApproach] already closer than side_offset (dist=%.3f, side=%.3f)",
@@ -1037,7 +1057,7 @@ private:
     const double rate_hz  = 20.0;
 
     RCLCPP_INFO(get_logger(),
-                "Driving relative: dist=%.3f m, vx=%.3f, dur=%.3f s",
+                "Driving relative: dist=%.2f m, vx=%.2f, dur=%.2f s",
                 move_dist, forward_speed, duration);
 
     rclcpp::Rate rate(rate_hz);
@@ -1057,14 +1077,12 @@ private:
     geometry_msgs::msg::Twist stop;
     cmd_vel_pub_->publish(stop);
 
-    double rxf, ryf, yawf;
-    if (get_robot_pose_odom(rxf, ryf, yawf)) {
-      double dxf = target_x_odom - rxf;
-      double dyf = target_y_odom - ryf;
-      double final_dist = std::sqrt(dxf*dxf + dyf*dyf);
-      RCLCPP_INFO(get_logger(),
-                  "[VelocityApproach] final distance to target ~ %.3f m", final_dist);
-    }
+    // Note: target_x_bl/y_bl was the pre-rotation offset, so this is only a
+    // rough post-drive estimate (rotation + drive both happened since it was
+    // measured), not a fresh TF-based distance. Good enough for a sanity log.
+    double estimated_remaining = dist - move_dist;
+    RCLCPP_INFO(get_logger(),
+                "[VelocityApproach] estimated remaining distance to target ~ %.3f m", estimated_remaining);
 
     return true;
   }
@@ -1204,7 +1222,8 @@ private:
       return false;
     }
 
-    RCLCPP_INFO(get_logger(),"Pointing at last known location x: %.03f y: %.03f", last_known_x_odom_, last_known_y_odom_);
+    RCLCPP_INFO(get_logger()," [DEBUGGING] Pointing at last known location x: %.03f y: %.03f", last_known_x_odom_, last_known_y_odom_);
+    RCLCPP_INFO(get_logger(),"[DEBUGGING] Post move arm point x: %.03f y: %.03f", ct.target_x_odom, ct.target_y_odom);
 
     double center_waist, center_wrist;
     if (!get_joint_position(base_joint_name_, center_waist) ||
@@ -1404,9 +1423,8 @@ private:
 
         // --------------------------------------------------------------
         case ScanState::VELOCITY_APPROACH: {
-        
+          
 
-          // Get a fresh detection with near-corner data before planning the move.
           double xb0, yb0, near1_xb, near1_yb, near2_xb, near2_yb;
           if (!call_detect_target(goal->min_confidence, xb0, yb0,
                                    near1_xb, near1_yb, near2_xb, near2_yb)) {
@@ -1415,33 +1433,32 @@ private:
             break;
           }
 
-          move_arm_to_stow_pose();
+          double target_x_bl, target_y_bl, near1_x_bl, near1_y_bl, near2_x_bl, near2_y_bl;
+          bool tf_ok =
+            transform_arm_point_to_base_link(xb0, yb0, target_x_bl, target_y_bl) &&
+            transform_arm_point_to_base_link(near1_xb, near1_yb, near1_x_bl, near1_y_bl) &&
+            transform_arm_point_to_base_link(near2_xb, near2_yb, near2_x_bl, near2_y_bl);
 
-          double near1_x_odom, near1_y_odom, near2_x_odom, near2_y_odom;
-          bool corners_ok =
-            transform_arm_point_to_odom(near1_xb, near1_yb, near1_x_odom, near1_y_odom) &&
-            transform_arm_point_to_odom(near2_xb, near2_yb, near2_x_odom, near2_y_odom);
-
-          if (!corners_ok) {
-            RCLCPP_WARN(get_logger(), "[VELOCITY_APPROACH] failed to transform near corners to odom");
+          if (!tf_ok) {
+            RCLCPP_WARN(get_logger(), "[VELOCITY_APPROACH] failed to transform target/corners to base_link");
             state = ScanState::LOCAL_RECOVERY;
             break;
           }
 
           double move_dist = 0.0;
           bool ok = determine_angle_offset(
-                      ctx.target_x_odom, ctx.target_y_odom,
-                      near1_x_odom, near1_y_odom,
-                      near2_x_odom, near2_y_odom,
+                      target_x_bl, target_y_bl,
+                      near1_x_bl, near1_y_bl,
+                      near2_x_bl, near2_y_bl,
                       move_dist)
-                 && drive_forward_to_side_offset(ctx.target_x_odom, ctx.target_y_odom, move_dist);
+                 && drive_forward_to_side_offset(target_x_bl, target_y_bl, move_dist);
 
           if (!ok) {
             RCLCPP_WARN(get_logger(), "[VELOCITY_APPROACH] rotate/drive failed");
             state = ScanState::LOCAL_RECOVERY;
             break;
           }
-
+           RCLCPP_INFO(get_logger(),"[DEBUGGING] Post move, pointing arm at x: %.03f y: %.03f", ct.target_x_odom, ct.target_y_odom);
           double xb, yb;
           if (track_target_once(ctx.target_x_odom, ctx.target_y_odom) &&
               call_detect_target(goal->min_confidence, xb, yb)) {

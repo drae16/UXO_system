@@ -255,8 +255,6 @@ class YoloDetectNode(Node):
             return result
 
         # 3) compute (x, y) of target
-        self.get_logger().info(f"camera pos = z={self.ELEVATION}, tilt = {self.TILT} , heading = {self.HEADING}")
-        self.get_logger().info(f"camera pos = height ={self.ELEVATION}, X = {self.POS_Y}, Y = {-self.POS_X}")
         x_min, y_min, x_max, y_max = best.xyxy[0].tolist()
         u = (x_min + x_max) / 2.0
         v = (y_min + y_max) / 2.0
@@ -268,8 +266,6 @@ class YoloDetectNode(Node):
             [x_min, y_min],   # top-left
             [x_max, y_min],   # top-right
         ]
-
-        self.get_logger().info(f"camera pos = z={self.ELEVATION}, tilt = {self.TILT}, heading = {self.HEADING}")
 
         all_positions = self.spatial_transformation(all_points_px, "Z", 0)
 
