@@ -2,6 +2,7 @@
 #!/usr/bin/env python3
 import math, time, threading
 from typing import Optional
+import csv
 
 import rclpy
 from rclpy.node import Node
