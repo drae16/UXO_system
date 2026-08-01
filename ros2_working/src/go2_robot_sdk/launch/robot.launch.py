@@ -297,7 +297,7 @@ class Go2NodeFactory:
                 package='robot_localization',
                 executable='navsat_transform_node',
                 name='navsat_transform',
-                remappings=[("/imu", "imu/data"),
+                remappings=[("imu", "imu/data"),
                             ("gps/fix","/fix"),
                             ("odometry/filtered", "odometry/global")
                 ],
@@ -322,7 +322,8 @@ class Go2NodeFactory:
             Node(
                 package='tf2_ros',
                 executable='static_transform_publisher',
-                arguments=["0.1", "0", "0.12", "0", "0", "0", "base_link", "vx300s/base_link"]
+                name='arm_to_base_transform',
+                arguments=["0", "0", "0.12", "0", "0", "0", "base_link", "vx300s/base_link"]
             ),
     ]
 

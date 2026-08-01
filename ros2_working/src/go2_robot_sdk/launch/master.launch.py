@@ -17,12 +17,6 @@ def generate_launch_description():
     return LaunchDescription([
         # Include your existing launch files
         IncludeLaunchDescription(PythonLaunchDescriptionSource(launch_a)),
-        IncludeLaunchDescription(PythonLaunchDescriptionSource(launch_b),
-                                 launch_arguments = {
-                                     'robot_model': 'vx300s',
-                                     'hardware_type': 'actual' 
-                                 }.items()
-                                 ),
 
         # Add your two additional nodes here
         Node(
@@ -32,12 +26,6 @@ def generate_launch_description():
             output='screen',
             remappings=[('/joint_states', '/vx300s/joint_states')],
         ),
-        Node(
-            package='nav_search',
-            executable='track_target',
-            name='track_target',
-            output='screen',
-        ),
 
         Node(
             package='nav_search',
@@ -45,4 +33,20 @@ def generate_launch_description():
             name='yolo_node',
             output='screen',
         ),
+
+        IncludeLaunchDescription(PythonLaunchDescriptionSource(launch_b),
+                                 launch_arguments = {
+                                     'robot_model': 'vx300s',
+                                     'hardware_type': 'actual',
+                                     'use_world_frame': 'false'
+                                 }.items()
+                                 ),
+        Node(
+            package='nav_search',
+            executable='gps_gate_node',
+            name='yolo_node',
+            output='screen',
+        ),
+
+        
     ])

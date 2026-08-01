@@ -761,9 +761,9 @@
           <axis xyz="1 0 0"/>
           <origin
             rpy="0 0 0"
-            xyz="0.0385 0 0.06"/>
+            xyz="0.01 0 -0.01"/>
           <parent
-            link="$(arg robot_name)/fingers_link"/>
+            link="$(arg robot_name)/ee_gripper_link"/>
           <child
             link="$(arg robot_name)/camera_link"/>
         </joint>

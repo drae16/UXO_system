@@ -10,6 +10,7 @@
 
 #include <sensor_msgs/msg/joint_state.hpp>
 #include <interbotix_xs_msgs/msg/joint_single_command.hpp>
+#include <std_srvs/srv/set_bool.hpp>
 
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_action/rclcpp_action.hpp>
@@ -87,28 +88,30 @@ public:
     end_angle_        = this->declare_parameter<double>("end_angle",   1.5);
     num_steps_        = this->declare_parameter<int>("num_steps",      10);
 
-    camera_height_        = this->declare_parameter<double>("camera_height",       0.5);
+    camera_height_        = this->declare_parameter<double>("camera_height",       0.4);
     radius_min_           = this->declare_parameter<double>("camera_radius_min",   0.20);
-    radius_max_           = this->declare_parameter<double>("camera_radius_max",   0.45);
+    radius_max_           = this->declare_parameter<double>("camera_radius_max",   0.65);
     radius_scale_factor_  = this->declare_parameter<double>("camera_radius_scale", 0.2);
 
     yaw_tolerance_rad_ = this->declare_parameter<double>("yaw_tolerance_rad", 0.05);
-    side_offset_        = this->declare_parameter<double>("side_offset", 0.40);
+    side_offset_        = this->declare_parameter<double>("side_offset", 0.3);
 
     joint_move_tolerance_ = this->declare_parameter<double>("joint_move_tolerance", 0.02);
     joint_move_timeout_   = this->declare_parameter<double>("joint_move_timeout", 3.0);
     joint_poll_rate_hz_   = this->declare_parameter<double>("joint_poll_rate_hz", 30.0);
 
     // --- FSM tunables ---
-    max_sweeps_             = this->declare_parameter<int>("max_sweeps", 3);
+    max_sweeps_             = this->declare_parameter<int>("max_sweeps", 1);
     desired_final_distance_ = this->declare_parameter<double>("desired_final_distance", 0.40);
-    nav2_switch_distance_   = this->declare_parameter<double>("nav2_switch_distance", 1.5);
+    nav2_switch_distance_   = this->declare_parameter<double>("nav2_switch_distance", 1.0);
     nav2_approach_margin_   = this->declare_parameter<double>("nav2_approach_margin", 0.2);
 
     local_recovery_rotation_deg_    = this->declare_parameter<double>("local_recovery_rotation_deg", 30.0);
     local_recovery_waist_range_deg_ = this->declare_parameter<double>("local_recovery_waist_range_deg", 15.0);
     local_recovery_waist_steps_     = this->declare_parameter<int>("local_recovery_waist_steps", 5);
     local_recovery_wrist_delta_deg_ = this->declare_parameter<double>("local_recovery_wrist_delta_deg", 10.0);
+
+    gps_gate_service_ = this->declare_parameter<std::string>("gps_gate_service", "set_gps_gate");
 
     cmd_vel_pub_ = this->create_publisher<geometry_msgs::msg::Twist>(
       "/cmd_vel_out", 10);
@@ -261,6 +264,56 @@ private:
     std::thread(&ArmSearchNode::execute_scan, this, goal_handle).detach();
   }
 
+    void init_gps_gate_client_if_needed()
+  {
+    if (!gps_gate_client_) {
+      RCLCPP_INFO(get_logger(), "Creating GPS gate service client on '%s'...",
+                  gps_gate_service_.c_str());
+      gps_gate_client_ = this->create_client<std_srvs::srv::SetBool>(gps_gate_service_);
+    }
+  }
+
+  // pass_through = true  -> GPS flows to the global EKF (normal global nav)
+  // pass_through = false -> GPS gated: map->odom held steady, motion stays odom-only
+  bool call_gps_gate(bool pass_through)
+  {
+    init_gps_gate_client_if_needed();
+    if (!gps_gate_client_) return false;
+
+    if (!gps_gate_client_->wait_for_service(2s)) {
+      RCLCPP_WARN(get_logger(),
+                  "GPS gate service '%s' unavailable; leaving GPS fusion unchanged",
+                  gps_gate_service_.c_str());
+      return false;
+    }
+
+    auto request = std::make_shared<std_srvs::srv::SetBool::Request>();
+    request->data = pass_through;
+
+    auto fut = gps_gate_client_->async_send_request(request);
+    if (fut.wait_for(2s) != std::future_status::ready) {
+      RCLCPP_WARN(get_logger(), "GPS gate service call timed out");
+      return false;
+    }
+
+    auto res = fut.get();
+    RCLCPP_INFO(get_logger(), "GPS gate -> %s",
+                (res && res->success) ? "PASS-THROUGH" : "GATED");
+    return true;
+  }
+
+  void cut_out_gps()   // freeze: drop GPS at the gate for the duration of the scan
+  {
+    RCLCPP_INFO(get_logger(), "[GPS] cutting out GPS (freezing map->odom)");
+    call_gps_gate(false);
+  }
+
+  void restore_gps()   // thaw: resume GPS fusion / global navigation
+  {
+    RCLCPP_INFO(get_logger(), "[GPS] restoring GPS fusion");
+    call_gps_gate(true);
+  }
+
   // === TF helpers ===========================================================
 
   bool get_robot_pose_odom(double &x, double &y, double &yaw)
@@ -286,6 +339,32 @@ private:
     double cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z);
     yaw = std::atan2(siny_cosp, cosy_cosp);
     return true;
+  }
+
+  // Transforms a point in arm_base_frame_ to odom. Returns false on TF failure.
+  bool transform_arm_point_to_odom(double xb, double yb, double &x_odom, double &y_odom)
+  {
+    if (!tf_buffer_) return false;
+
+    geometry_msgs::msg::PoseStamped p_arm;
+    p_arm.header.frame_id = arm_base_frame_;
+    p_arm.header.stamp    = this->now();
+    p_arm.pose.position.x = xb;
+    p_arm.pose.position.y = yb;
+    p_arm.pose.position.z = 0.0;
+    p_arm.pose.orientation.w = 1.0;
+
+    try {
+      auto p_odom = tf_buffer_->transform(p_arm, "odom", tf2::durationFromSec(0.5));
+      x_odom = p_odom.pose.position.x;
+      y_odom = p_odom.pose.position.y;
+      return true;
+    }
+    catch (const tf2::TransformException & ex) {
+      RCLCPP_WARN(get_logger(), "Transform %s->odom failed: %s",
+                  arm_base_frame_.c_str(), ex.what());
+      return false;
+    }
   }
 
   // === Camera circle pose computation =======================================
@@ -387,6 +466,23 @@ private:
     ee_pose_in_base.position.y = T_base_ee.getOrigin().y();
     ee_pose_in_base.position.z = T_base_ee.getOrigin().z();
     ee_pose_in_base.orientation = tf2::toMsg(T_base_ee.getRotation());
+
+    double roll, pitch, yaw;
+    tf2::Matrix3x3(T_base_ee.getRotation()).getRPY(roll, pitch, yaw);
+
+    RCLCPP_WARN(get_logger(),
+      "EE pose in base X: %.3f, Y: %.3f, Z: %.3f",
+      ee_pose_in_base.position.x, ee_pose_in_base.position.y, ee_pose_in_base.position.z);
+
+    RCLCPP_WARN(get_logger(),
+      "EE orientation (quat) x: %.3f, y: %.3f, z: %.3f, w: %.3f",
+      ee_pose_in_base.orientation.x, ee_pose_in_base.orientation.y,
+      ee_pose_in_base.orientation.z, ee_pose_in_base.orientation.w);
+
+    RCLCPP_WARN(get_logger(),
+      "EE orientation (RPY, deg) roll: %.1f, pitch: %.1f, yaw: %.1f",
+      roll * 180.0 / M_PI, pitch * 180.0 / M_PI, yaw * 180.0 / M_PI);
+
     return true;
   }
 
@@ -584,6 +680,7 @@ private:
     RCLCPP_INFO(get_logger(), "Moving arm to named state 'Search'");
     move_group_->setStartStateToCurrentState();
     bool has_target = move_group_->setNamedTarget("Search");
+
     if (!has_target) {
       RCLCPP_WARN(get_logger(),
                   "Named target 'Search' not found for group '%s'",
@@ -637,7 +734,19 @@ private:
 
   // === YOLO DetectTarget client =============================================
 
+  // Simple overload: center only. Used by every call site that doesn't need
+  // the target's near-edge corners.
   bool call_detect_target(double min_conf, double &x, double &y)
+  {
+    double nx1, ny1, nx2, ny2;
+    return call_detect_target(min_conf, x, y, nx1, ny1, nx2, ny2);
+  }
+
+  // Full overload: center + two nearest bbox corners (arm base frame).
+  // Used by VELOCITY_APPROACH, which needs the corners for rotation clearance.
+  bool call_detect_target(double min_conf, double &x, double &y,
+                           double &near_x1, double &near_y1,
+                           double &near_x2, double &near_y2)
   {
     if (!detect_client_) {
       init_detect_client_if_needed();
@@ -681,7 +790,13 @@ private:
 
     x = result->x_base;
     y = result->y_base;
-    RCLCPP_INFO(get_logger(), "detect_target: target at (%.2f, %.2f) in arm base frame", x, y);
+    near_x1 = result->near_x1;
+    near_y1 = result->near_y1;
+    near_x2 = result->near_x2;
+    near_y2 = result->near_y2;
+
+    RCLCPP_INFO(get_logger(), "detect_target: target at (%.2f, %.2f) arm base frame, near corners (%.2f,%.2f) (%.2f,%.2f)",
+                x, y, near_x1, near_y1, near_x2, near_y2);
     return true;
   }
 
@@ -818,7 +933,14 @@ private:
     return a;
   }
 
-  bool determine_angle_offset(double target_x_odom, double target_y_odom, double &calc_move, double ang_speed = 0.50)
+  // Rotation AND drive distance both widened by the target's near-edge
+  // half-width, so the robot both turns further out and stops further back
+  // to clear the target's physical footprint, not just its center point.
+   bool determine_angle_offset(
+    double target_x_odom, double target_y_odom,
+    double near1_x_odom, double near1_y_odom,
+    double near2_x_odom, double near2_y_odom,
+    double &calc_move, double ang_speed = 0.50)
   {
     double rx, ry, ryaw;
     if (!get_robot_pose_odom(rx, ry, ryaw)) {
@@ -833,43 +955,54 @@ private:
       return true;
     }
 
-    double theta = 1.5*std::atan2(dy, dx);
-    const double s = side_offset_;
-    double angle_to_goal = std::atan2(s, remain_dist);
-    calc_move = std::sqrt(remain_dist*remain_dist - s*s);
-    RCLCPP_INFO(get_logger(),
-            "[VelocityApproach] Distance to move = %.3f",
-            calc_move);
+    double theta = std::atan2(dy, dx);  // true bearing to target, no scaling
 
-    double yaw_left = normalize_angle(theta - angle_to_goal);
+    double edge_dx = near2_x_odom - near1_x_odom;
+    double edge_dy = near2_y_odom - near1_y_odom;
+    double edge_half_width = 0.5 * std::sqrt(edge_dx*edge_dx + edge_dy*edge_dy);
+
+    const double s = side_offset_ + edge_half_width;
+    double angle_to_goal = std::atan2(s, remain_dist);
+
+    double s_sq_diff = remain_dist*remain_dist - s*s;
+    if (s_sq_diff < 0.0) {
+      RCLCPP_WARN(get_logger(),
+                  "[VelocityApproach] effective_offset (%.3f) exceeds remaining distance (%.3f); clamping move to 0",
+                  s, remain_dist);
+      calc_move = 0.0;
+    } else {
+      calc_move = std::sqrt(s_sq_diff);
+    }
+
+    RCLCPP_INFO(get_logger(),
+                "[VelocityApproach] center_dist=%.3f, edge_half_width=%.3f, effective_offset=%.3f, move=%.3f",
+                remain_dist, edge_half_width, s, calc_move);
+
+    double yaw_left  = normalize_angle(theta - angle_to_goal);
     double yaw_right = normalize_angle(theta + angle_to_goal);
 
     double err_left  = normalize_angle(yaw_left  - ryaw);
     double err_right = normalize_angle(yaw_right - ryaw);
 
-    double yaw_goal  = (std::fabs(err_left) < std::fabs(err_right)) ? yaw_left : yaw_right;
+    double yaw_goal = (std::fabs(err_left) < std::fabs(err_right)) ? yaw_left : yaw_right;
 
     RCLCPP_INFO(get_logger(),
                 "[VelocityApproach] rotate: theta_to_target=%.3f, yaw_goal=%.3f",
                 theta, yaw_goal);
 
     rclcpp::Rate rate(20.0);
-
     while (rclcpp::ok()) {
       if (!get_robot_pose_odom(rx, ry, ryaw)) {
         return false;
       }
-
       double err = normalize_angle(yaw_goal - ryaw);
       if (std::fabs(err) < yaw_tolerance_rad_) {
         RCLCPP_INFO(get_logger(), "[VelocityApproach] rotation complete, yaw=%.3f", ryaw);
         break;
       }
-
       geometry_msgs::msg::Twist cmd;
       cmd.angular.z = (err > 0.0) ? ang_speed : -ang_speed;
       cmd_vel_pub_->publish(cmd);
-
       rate.sleep();
     }
 
@@ -904,7 +1037,7 @@ private:
     const double rate_hz  = 20.0;
 
     RCLCPP_INFO(get_logger(),
-                "Driving relative: dist=%.2f m, vx=%.2f, dur=%.2f s",
+                "Driving relative: dist=%.3f m, vx=%.3f, dur=%.3f s",
                 move_dist, forward_speed, duration);
 
     rclcpp::Rate rate(rate_hz);
@@ -970,11 +1103,6 @@ private:
   }
 
   // === Full scan sweep (Detection phase, single-target) =====================
-  // Runs one full wrist-level x waist sweep. On each raw detection, verifies via
-  // track_target_once; on verify success fills target_x_odom/y_odom and returns
-  // true immediately. On verify failure, restores joint state and resumes the
-  // sweep from the next step. Returns false if the sweep completes with nothing
-  // verified.
   bool run_full_scan_sweep(
     const std::shared_ptr<ScanGoalHandle> &goal_handle,
     std::shared_ptr<const ScanArea::Goal> goal,
@@ -1038,31 +1166,10 @@ private:
         RCLCPP_INFO(get_logger(), "Raw detection at level %d: (%.2f, %.2f) arm base frame",
                     level, xb, yb);
 
-        if (!tf_buffer_) {
-          RCLCPP_ERROR(get_logger(), "TF buffer not initialized");
-          return false;
-        }
-
-        geometry_msgs::msg::PoseStamped det_arm;
-        det_arm.header.frame_id = arm_base_frame_;
-        det_arm.header.stamp    = this->now();
-        det_arm.pose.position.x = xb;
-        det_arm.pose.position.y = yb;
-        det_arm.pose.position.z = 0.0;
-        det_arm.pose.orientation.w = 1.0;
-
-        geometry_msgs::msg::PoseStamped det_odom;
-        try {
-          det_odom = tf_buffer_->transform(det_arm, "odom", tf2::durationFromSec(0.5));
-        }
-        catch (const tf2::TransformException & ex) {
-          RCLCPP_WARN(get_logger(), "Transform %s->odom failed: %s",
-                      arm_base_frame_.c_str(), ex.what());
+        double cand_x_odom, cand_y_odom;
+        if (!transform_arm_point_to_odom(xb, yb, cand_x_odom, cand_y_odom)) {
           continue;
         }
-
-        double cand_x_odom = det_odom.pose.position.x;
-        double cand_y_odom = det_odom.pose.position.y;
 
         auto pre_state = capture_arm_joint_state();
         track_target_once(cand_x_odom, cand_y_odom);
@@ -1073,6 +1180,8 @@ private:
           target_y_odom = cand_y_odom;
           x_base_det = xb_verify;
           y_base_det = yb_verify;
+          RCLCPP_INFO(get_logger(), "VALUES RETURNED FROM SWEEP FOR DISTANCE ODOM X,Y: %.2f,%.2f, ARM_BASE: %.2f,%.2f",
+          target_x_odom,target_y_odom,x_base_det,y_base_det);
           return true;
         }
 
@@ -1086,18 +1195,16 @@ private:
   }
 
   // === Local recovery search =================================================
-  // Rotates base_link to clear the GPS horn, aims the arm at the last known
-  // odom-frame target position, then sweeps waist +/-15 deg across 3 wrist
-  // angle levels (+/-10 deg from center) looking for the target.
   bool run_local_recovery_search(double min_confidence, double &xb_out, double &yb_out)
   {
     move_arm_to_stow_pose();
-    rotate_base_link_relative(local_recovery_rotation_deg_ * M_PI / 180.0);
 
     if (!track_target_once(last_known_x_odom_, last_known_y_odom_)) {
       RCLCPP_WARN(get_logger(), "[LocalRecovery] failed to aim arm at last known position");
       return false;
     }
+
+    RCLCPP_INFO(get_logger(),"Pointing at last known location x: %.03f y: %.03f", last_known_x_odom_, last_known_y_odom_);
 
     double center_waist, center_wrist;
     if (!get_joint_position(base_joint_name_, center_waist) ||
@@ -1144,6 +1251,17 @@ private:
     return false;
   }
 
+
+  // RAII: restores GPS fusion whenever execute_scan() returns by ANY path —
+  // normal completion, abort, cancel, early return, or a thrown exception.
+  struct GpsGateGuard {
+    ArmSearchNode* node;
+    explicit GpsGateGuard(ArmSearchNode* n) : node(n) {}
+    ~GpsGateGuard() { if (node) node->restore_gps(); }
+    GpsGateGuard(const GpsGateGuard&) = delete;
+    GpsGateGuard& operator=(const GpsGateGuard&) = delete;
+  };
+
   // === Core Scan implementation (FSM dispatch) ===============================
 
   void execute_scan(const std::shared_ptr<ScanGoalHandle> goal_handle)
@@ -1158,12 +1276,17 @@ private:
     init_detect_client_if_needed();
     init_nav2_client_if_needed();
     init_track_client_if_needed();
+    init_gps_gate_client_if_needed();  
 
     if (!move_group_) {
       RCLCPP_ERROR(get_logger(), "MoveGroupInterface not initialized; aborting scan.");
       goal_handle->abort(result);
       return;
     }
+
+    cut_out_gps();
+
+    GpsGateGuard gps_guard(this);
 
     ScanContext ctx;
     ctx.max_sweeps_effective = max_sweeps_;
@@ -1281,10 +1404,36 @@ private:
 
         // --------------------------------------------------------------
         case ScanState::VELOCITY_APPROACH: {
+        
+
+          // Get a fresh detection with near-corner data before planning the move.
+          double xb0, yb0, near1_xb, near1_yb, near2_xb, near2_yb;
+          if (!call_detect_target(goal->min_confidence, xb0, yb0,
+                                   near1_xb, near1_yb, near2_xb, near2_yb)) {
+            RCLCPP_WARN(get_logger(), "[VELOCITY_APPROACH] could not get fresh detection with corners");
+            state = ScanState::LOCAL_RECOVERY;
+            break;
+          }
+
           move_arm_to_stow_pose();
 
+          double near1_x_odom, near1_y_odom, near2_x_odom, near2_y_odom;
+          bool corners_ok =
+            transform_arm_point_to_odom(near1_xb, near1_yb, near1_x_odom, near1_y_odom) &&
+            transform_arm_point_to_odom(near2_xb, near2_yb, near2_x_odom, near2_y_odom);
+
+          if (!corners_ok) {
+            RCLCPP_WARN(get_logger(), "[VELOCITY_APPROACH] failed to transform near corners to odom");
+            state = ScanState::LOCAL_RECOVERY;
+            break;
+          }
+
           double move_dist = 0.0;
-          bool ok = determine_angle_offset(ctx.target_x_odom, ctx.target_y_odom, move_dist)
+          bool ok = determine_angle_offset(
+                      ctx.target_x_odom, ctx.target_y_odom,
+                      near1_x_odom, near1_y_odom,
+                      near2_x_odom, near2_y_odom,
+                      move_dist)
                  && drive_forward_to_side_offset(ctx.target_x_odom, ctx.target_y_odom, move_dist);
 
           if (!ok) {
@@ -1311,22 +1460,12 @@ private:
         case ScanState::LOCAL_RECOVERY: {
           double xb, yb;
           if (run_local_recovery_search(goal->min_confidence, xb, yb)) {
-            geometry_msgs::msg::PoseStamped det_arm;
-            det_arm.header.frame_id = arm_base_frame_;
-            det_arm.header.stamp    = this->now();
-            det_arm.pose.position.x = xb;
-            det_arm.pose.position.y = yb;
-            det_arm.pose.orientation.w = 1.0;
-
-            try {
-              auto det_odom = tf_buffer_->transform(det_arm, "odom", tf2::durationFromSec(0.5));
-              ctx.target_x_odom = det_odom.pose.position.x;
-              ctx.target_y_odom = det_odom.pose.position.y;
-              last_known_x_odom_ = ctx.target_x_odom;
-              last_known_y_odom_ = ctx.target_y_odom;
-            }
-            catch (const tf2::TransformException & ex) {
-              RCLCPP_WARN(get_logger(), "[LocalRecovery] transform to odom failed: %s", ex.what());
+            double odom_x, odom_y;
+            if (transform_arm_point_to_odom(xb, yb, odom_x, odom_y)) {
+              ctx.target_x_odom = odom_x;
+              ctx.target_y_odom = odom_y;
+              last_known_x_odom_ = odom_x;
+              last_known_y_odom_ = odom_y;
             }
 
             ctx.x_base_last = xb;
@@ -1433,6 +1572,8 @@ private:
   std::shared_ptr<DetectClient> detect_client_;
   std::shared_ptr<Nav2Client>   nav2_client_;
   std::shared_ptr<TrackClient> track_client_;
+  std::string gps_gate_service_;
+
 
   std::shared_ptr<tf2_ros::Buffer>           tf_buffer_;
   std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
@@ -1440,6 +1581,7 @@ private:
   rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_pub_;
   rclcpp::Publisher<interbotix_xs_msgs::msg::JointSingleCommand>::SharedPtr joint_single_pub_;
   rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_state_sub_;
+  rclcpp::Client<std_srvs::srv::SetBool>::SharedPtr gps_gate_client_;
 };
 
 int main(int argc, char** argv)

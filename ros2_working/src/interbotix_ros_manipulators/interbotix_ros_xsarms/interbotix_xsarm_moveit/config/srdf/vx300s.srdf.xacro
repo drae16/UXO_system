@@ -57,7 +57,7 @@
         <joint name="wrist_angle" value="0.8" />
         <joint name="wrist_rotate" value="0" />
     </group_state>
-        <group_state name="Search" group="interbotix_arm">
+    <group_state name="Search" group="interbotix_arm">
         <joint name="elbow" value="-0.3679" />
         <joint name="forearm_roll" value="0.0524" />
         <joint name="shoulder" value="-0.5585" />
