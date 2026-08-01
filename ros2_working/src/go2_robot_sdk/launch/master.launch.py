@@ -34,7 +34,6 @@ def generate_launch_description():
             output='screen',
         ),
 
-<<<<<<< HEAD
         IncludeLaunchDescription(PythonLaunchDescriptionSource(launch_b),
                                  launch_arguments = {
                                      'robot_model': 'vx300s',
@@ -42,7 +41,6 @@ def generate_launch_description():
                                      'use_world_frame': 'false'
                                  }.items()
                                  ),
-=======
         Node(
             package='nav_search',
             executable='gps_gate_node',
@@ -51,5 +49,4 @@ def generate_launch_description():
         ),
 
         
->>>>>>> local_frame_nav_test
     ])

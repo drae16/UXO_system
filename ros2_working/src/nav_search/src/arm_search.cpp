@@ -10,6 +10,7 @@
 
 #include <sensor_msgs/msg/joint_state.hpp>
 #include <interbotix_xs_msgs/msg/joint_single_command.hpp>
+#include <std_srvs/srv/set_bool.hpp>
 
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_action/rclcpp_action.hpp>
@@ -109,6 +110,8 @@ public:
     local_recovery_waist_range_deg_ = this->declare_parameter<double>("local_recovery_waist_range_deg", 15.0);
     local_recovery_waist_steps_     = this->declare_parameter<int>("local_recovery_waist_steps", 5);
     local_recovery_wrist_delta_deg_ = this->declare_parameter<double>("local_recovery_wrist_delta_deg", 10.0);
+
+    gps_gate_service_ = this->declare_parameter<std::string>("gps_gate_service", "set_gps_gate");
 
     cmd_vel_pub_ = this->create_publisher<geometry_msgs::msg::Twist>(
       "/cmd_vel_out", 10);
@@ -259,6 +262,56 @@ private:
   {
     RCLCPP_INFO(get_logger(), "ScanArea goal accepted, starting scan thread...");
     std::thread(&ArmSearchNode::execute_scan, this, goal_handle).detach();
+  }
+
+    void init_gps_gate_client_if_needed()
+  {
+    if (!gps_gate_client_) {
+      RCLCPP_INFO(get_logger(), "Creating GPS gate service client on '%s'...",
+                  gps_gate_service_.c_str());
+      gps_gate_client_ = this->create_client<std_srvs::srv::SetBool>(gps_gate_service_);
+    }
+  }
+
+  // pass_through = true  -> GPS flows to the global EKF (normal global nav)
+  // pass_through = false -> GPS gated: map->odom held steady, motion stays odom-only
+  bool call_gps_gate(bool pass_through)
+  {
+    init_gps_gate_client_if_needed();
+    if (!gps_gate_client_) return false;
+
+    if (!gps_gate_client_->wait_for_service(2s)) {
+      RCLCPP_WARN(get_logger(),
+                  "GPS gate service '%s' unavailable; leaving GPS fusion unchanged",
+                  gps_gate_service_.c_str());
+      return false;
+    }
+
+    auto request = std::make_shared<std_srvs::srv::SetBool::Request>();
+    request->data = pass_through;
+
+    auto fut = gps_gate_client_->async_send_request(request);
+    if (fut.wait_for(2s) != std::future_status::ready) {
+      RCLCPP_WARN(get_logger(), "GPS gate service call timed out");
+      return false;
+    }
+
+    auto res = fut.get();
+    RCLCPP_INFO(get_logger(), "GPS gate -> %s",
+                (res && res->success) ? "PASS-THROUGH" : "GATED");
+    return true;
+  }
+
+  void cut_out_gps()   // freeze: drop GPS at the gate for the duration of the scan
+  {
+    RCLCPP_INFO(get_logger(), "[GPS] cutting out GPS (freezing map->odom)");
+    call_gps_gate(false);
+  }
+
+  void restore_gps()   // thaw: resume GPS fusion / global navigation
+  {
+    RCLCPP_INFO(get_logger(), "[GPS] restoring GPS fusion");
+    call_gps_gate(true);
   }
 
   // === TF helpers ===========================================================
@@ -1145,7 +1198,6 @@ private:
   bool run_local_recovery_search(double min_confidence, double &xb_out, double &yb_out)
   {
     move_arm_to_stow_pose();
-    rotate_base_link_relative(local_recovery_rotation_deg_ * M_PI / 180.0);
 
     if (!track_target_once(last_known_x_odom_, last_known_y_odom_)) {
       RCLCPP_WARN(get_logger(), "[LocalRecovery] failed to aim arm at last known position");
@@ -1199,6 +1251,17 @@ private:
     return false;
   }
 
+
+  // RAII: restores GPS fusion whenever execute_scan() returns by ANY path —
+  // normal completion, abort, cancel, early return, or a thrown exception.
+  struct GpsGateGuard {
+    ArmSearchNode* node;
+    explicit GpsGateGuard(ArmSearchNode* n) : node(n) {}
+    ~GpsGateGuard() { if (node) node->restore_gps(); }
+    GpsGateGuard(const GpsGateGuard&) = delete;
+    GpsGateGuard& operator=(const GpsGateGuard&) = delete;
+  };
+
   // === Core Scan implementation (FSM dispatch) ===============================
 
   void execute_scan(const std::shared_ptr<ScanGoalHandle> goal_handle)
@@ -1213,12 +1276,17 @@ private:
     init_detect_client_if_needed();
     init_nav2_client_if_needed();
     init_track_client_if_needed();
+    init_gps_gate_client_if_needed();  
 
     if (!move_group_) {
       RCLCPP_ERROR(get_logger(), "MoveGroupInterface not initialized; aborting scan.");
       goal_handle->abort(result);
       return;
     }
+
+    cut_out_gps();
+
+    GpsGateGuard gps_guard(this);
 
     ScanContext ctx;
     ctx.max_sweeps_effective = max_sweeps_;
@@ -1504,6 +1572,8 @@ private:
   std::shared_ptr<DetectClient> detect_client_;
   std::shared_ptr<Nav2Client>   nav2_client_;
   std::shared_ptr<TrackClient> track_client_;
+  std::string gps_gate_service_;
+
 
   std::shared_ptr<tf2_ros::Buffer>           tf_buffer_;
   std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
@@ -1511,6 +1581,7 @@ private:
   rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_pub_;
   rclcpp::Publisher<interbotix_xs_msgs::msg::JointSingleCommand>::SharedPtr joint_single_pub_;
   rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_state_sub_;
+  rclcpp::Client<std_srvs::srv::SetBool>::SharedPtr gps_gate_client_;
 };
 
 int main(int argc, char** argv)

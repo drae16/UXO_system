@@ -52,7 +52,7 @@ class YoloDetectNode(Node):
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
 
-        self.camera = cv.VideoCapture(2)
+        self.camera = cv.VideoCapture(3)
         self.camera.set(cv.CAP_PROP_FOURCC, cv.VideoWriter_fourcc(*"MJPG"))
         self.camera.set(cv.CAP_PROP_FRAME_WIDTH,  640)
         self.camera.set(cv.CAP_PROP_FRAME_HEIGHT, 480)
