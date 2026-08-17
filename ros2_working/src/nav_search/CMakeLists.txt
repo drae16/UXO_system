@@ -33,6 +33,7 @@ ament_target_dependencies(arm_search
   rclcpp_action
   moveit_ros_planning_interface
   nav2_msgs
+  nav_msgs 
   tf2_ros
   tf2_geometry_msgs
   interbotix_xs_msgs
@@ -57,7 +58,18 @@ ament_target_dependencies(
   rclcpp 
   nav_msgs 
   std_srvs
+  tf2
+  tf2_ros
+  tf2_geometry_msgs
   )
+
+add_executable(odom_tf_republisher_node src/odom_tf_republisher_node.cpp)
+ament_target_dependencies(odom_tf_republisher_node
+  rclcpp
+  nav_msgs
+  geometry_msgs
+  tf2_ros)
+
 
 rosidl_target_interfaces(track_target
   ${PROJECT_NAME} "rosidl_typesupport_cpp")
@@ -66,6 +78,7 @@ install(TARGETS
   arm_search
   track_target
   gps_gate_node
+  odom_tf_republisher_node
   DESTINATION lib/${PROJECT_NAME})
  
  install(

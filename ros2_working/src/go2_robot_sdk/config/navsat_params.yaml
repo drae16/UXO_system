@@ -5,7 +5,7 @@ ekf_filter_node_map:
     two_d_mode: true  # Recommended to use 2d mode for nav2 in mostly planar environments
     print_diagnostics: true
     debug: false
-    publish_tf: true
+    publish_tf: false
     transform_time_offset: 0.05
 
     map_frame: map
@@ -14,16 +14,16 @@ ekf_filter_node_map:
     world_frame: map
 
     odom0: /odom_corrected
-    odom0_config: [false, false, false,
+    odom0_config: [true, true, false,
                   false, false, false,
-                  true,  true,  false,
+                  false,  false,  false,
                   false, false, false,
                   false, false, false]
     odom0_queue_size: 10
-    odom0_differential: false
+    odom0_differential: true
     odom0_relative: false
 
-    odom1: /odometry/gps_gated
+    odom1: /odometry/gps
     odom1_config: [true,  true,  false,
                   false, false, false,
                   false, false, false,

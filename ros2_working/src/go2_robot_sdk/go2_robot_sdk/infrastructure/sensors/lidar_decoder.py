@@ -17,53 +17,50 @@ from ament_index_python import get_package_share_directory
 
 
 def update_meshes_for_cloud2(
-    positions: list, 
-    uvs: list, 
-    res: float, 
-    origin: list, 
-    intense_limiter: float
+    positions: list,
+    uvs: list,
+    res: float,
+    origin: list,
+    intense_limiter: float,
+    voxel_leaf: float = 0.05,   # meters; None/0 disables downsampling
+    z_min: float = None,        # optional height crop (odom-frame z)
+    z_max: float = None,
 ) -> np.ndarray:
-    """
-    Process LiDAR point cloud data for ROS2 PointCloud2 message.
-    
-    Args:
-        positions: Raw position data from LiDAR
-        uvs: UV coordinate data
-        res: Resolution factor
-        origin: Origin offset coordinates
-        intense_limiter: Intensity threshold filter
-        
-    Returns:
-        Processed point cloud array with x,y,z,intensity
-    """
-    # Convert positions to numpy array for vectorized operations
+    # --- decode positions + intensities (unchanged) ---
     position_array = np.array(positions).reshape(-1, 3).astype(np.float32)
-
-    # Apply resolution scaling
     position_array *= res
-
-    # Apply origin offset
     position_array += origin
 
-    # Convert UV coordinates to numpy array
     uv_array = np.array(uvs, dtype=np.float32).reshape(-1, 2)
-
-    # Calculate intensities from UV values
     intensities = np.min(uv_array, axis=1, keepdims=True)
 
-    # Combine positions with intensities
-    positions_with_intensities = np.hstack((position_array, intensities))
+    points = np.hstack((position_array, intensities))
 
-    # Filter out points below intensity threshold
-    filtered_points = positions_with_intensities[
-        positions_with_intensities[:, -1] > intense_limiter
-    ]
+    # intensity threshold
+    points = points[points[:, 3] > intense_limiter]
+    if points.shape[0] == 0:
+        return points
 
-    # Remove duplicate points
-    unique_points = np.unique(filtered_points, axis=0)
-    
-    return unique_points
+    # optional height crop (valid in odom frame; range crop is NOT done here --
+    # see note below, do it in STVL instead)
+    if z_min is not None and z_max is not None:
+        z = points[:, 2]
+        points = points[(z >= z_min) & (z <= z_max)]
+        if points.shape[0] == 0:
+            return points
 
+    # voxel downsample: quantize xyz to a grid, keep one point per cell.
+    # Packs the 3 cell indices into one int64 key so this is a single cheap 1D
+    # np.unique -- replacing the old O(N log N) 4-column float unique that ran
+    # every frame and deduped almost nothing (intensity made rows unique).
+    if voxel_leaf and voxel_leaf > 0:
+        q = np.floor(points[:, :3] / voxel_leaf).astype(np.int64)
+        q -= q.min(axis=0)                     # shift non-negative for packing
+        keys = (q[:, 0] << 40) | (q[:, 1] << 20) | q[:, 2]
+        _, idx = np.unique(keys, return_index=True)
+        points = points[idx]
+
+    return points
 
 class LidarDecoder:
     """Original WASM-based LiDAR decoder - the working implementation"""

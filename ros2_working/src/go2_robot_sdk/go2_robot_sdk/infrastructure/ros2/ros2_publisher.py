@@ -104,7 +104,7 @@ class ROS2Publisher(IRobotDataPublisher):
         odom_trans.transform.rotation.z = z#float(corrected_orientation[2]/norm)
         odom_trans.transform.rotation.w = w#float(corrected_orientation[3]/norm)
 
-        self.broadcaster.sendTransform(odom_trans)
+        #self.broadcaster.sendTransform(odom_trans)
         
     #Transform from base_link to base_footprint
     def _publish_footprint(self):
@@ -149,9 +149,9 @@ class ROS2Publisher(IRobotDataPublisher):
         position = robot_data.odometry_data.position
         orientation = robot_data.odometry_data.orientation
 
-        odom_msg.pose.pose.position.x = float(position['x']) * 1.2
-        odom_msg.pose.pose.position.y = float(position['y']) * 1.2
-        odom_msg.pose.pose.position.z = float(position['z']) + 0.07
+        odom_msg.pose.pose.position.x = float(position['x']) # 1.2
+        odom_msg.pose.pose.position.y = float(position['y']) # 1.2
+        odom_msg.pose.pose.position.z = float(position['z']) # 0.07
 
         x = float(orientation['x'])
         y = float(orientation['y'])

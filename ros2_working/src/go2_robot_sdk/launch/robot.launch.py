@@ -194,33 +194,33 @@ class Go2NodeFactory:
                 }],
             ),
             # LiDAR processing node (C++ implementation)
-            Node(
-                package='lidar_processor_cpp',
-                executable='lidar_to_pointcloud_node',
-                name='lidar_to_pointcloud',
-                remappings=[
-                    ('point_cloud2', 'point_cloud2'),  # Remap for single robot mode
-                ] if self.config.conn_mode == 'single' else [],
-                parameters=[{
-                    'robot_ip_lst': self.config.robot_ip_list,
-                    'map_name': self.config.map_name,
-                    'map_save': self.config.save_map
-                }],
-            ),
+#            Node(
+ #               package='lidar_processor_cpp',
+  #              executable='lidar_to_pointcloud_node',
+   #             name='lidar_to_pointcloud',
+    #            remappings=[
+     #               ('point_cloud2', 'point_cloud2'),  # Remap for single robot mode
+      #          ] if self.config.conn_mode == 'single' else [],
+       #         parameters=[{
+        #            'robot_ip_lst': self.config.robot_ip_list,
+         #           'map_name': self.config.map_name,
+          #          'map_save': self.config.save_map
+           #     }],
+            #),
             # Advanced point cloud aggregator (C++ implementation)
-            Node(
-                package='lidar_processor_cpp',
-                executable='pointcloud_aggregator_node',
-                name='pointcloud_aggregator',
-                parameters=[{
-                    'max_range': 20.0,
-                    'min_range': 0.1,
-                    'height_filter_min': -2.0,
-                    'height_filter_max': 3.0,
-                    'downsample_rate': 1,
-                    'publish_rate': 20.0
-                }],
-            ),
+#            Node(
+ #               package='lidar_processor_cpp',
+  #              executable='pointcloud_aggregator_node',
+   #             name='pointcloud_aggregator',
+    #            parameters=[{
+     #               'max_range': 20.0,
+      #              'min_range': 0.1,
+       #             'height_filter_min': -2.0,
+        #            'height_filter_max': 3.0,
+         #           'downsample_rate': 1,
+          #          'publish_rate': 20.0
+           #     }],
+            #),
             # TTS Node (new separate package)
             Node(
                 package='speech_processor',
@@ -323,7 +323,7 @@ class Go2NodeFactory:
                 package='tf2_ros',
                 executable='static_transform_publisher',
                 name='arm_to_base_transform',
-                arguments=["0", "0", "0.12", "0", "0", "0", "base_link", "vx300s/base_link"]
+                arguments=["0.07", "0", "0.12", "0", "0", "0", "base_link", "vx300s/base_link"]
             ),
     ]
 

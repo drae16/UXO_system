@@ -44,9 +44,19 @@ def generate_launch_description():
         Node(
             package='nav_search',
             executable='gps_gate_node',
-            name='yolo_node',
+            name='gps_gate_node',
             output='screen',
         ),
+
+        Node(
+            package='nav_search',
+            executable='odom_tf_republisher_node',
+            name='odom_tf_republisher_node',
+            output='screen',
+        ),
+
+
+        
 
         
     ])

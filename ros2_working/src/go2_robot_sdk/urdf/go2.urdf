@@ -1258,7 +1258,7 @@ Stephen Brawner (brawner@gmail.com)
     name="gps_joint"
     type="fixed">
     <origin
-      xyz=".30 .20 0"
+      xyz=".25 .0 .15"
       rpy="0 0 0" />
     <parent
       link="base_link" />

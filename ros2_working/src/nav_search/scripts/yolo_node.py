@@ -52,7 +52,7 @@ class YoloDetectNode(Node):
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
 
-        self.camera = cv.VideoCapture(3)
+        self.camera = cv.VideoCapture(2)
         self.camera.set(cv.CAP_PROP_FOURCC, cv.VideoWriter_fourcc(*"MJPG"))
         self.camera.set(cv.CAP_PROP_FRAME_WIDTH,  640)
         self.camera.set(cv.CAP_PROP_FRAME_HEIGHT, 480)
@@ -61,19 +61,6 @@ class YoloDetectNode(Node):
         actual_w = self.camera.get(cv.CAP_PROP_FRAME_WIDTH)
         actual_h = self.camera.get(cv.CAP_PROP_FRAME_HEIGHT)
         self.get_logger().info(f"Resolution: {actual_w} x {actual_h}")
-
-        # writer records every frame from the camera thread. size must match the
-        # frames actually returned or write() silently drops them -> empty file.
-        self.fourcc = cv.VideoWriter_fourcc(*"mp4v")
-        self.out = cv.VideoWriter("/home/drl/output.mp4", self.fourcc, 20.0,
-                                  (int(actual_w), int(actual_h)))
-
-        self.last_image = None
-
-        # camera thread owns the capture: the only place read()/write() happen.
-        self.running = True
-        self.camera_thread = threading.Thread(target=self.camera_loop, daemon=True)
-        self.camera_thread.start()
 
         self.server = ActionServer(
             self,
@@ -95,15 +82,6 @@ class YoloDetectNode(Node):
         self.BLUR_THRESHOLD = 800.0
         self.SHARP_TIMEOUT = 1.0 # seconds to wait for a sharp frame before giving up
 
-    def camera_loop(self):
-        # continuously drain the camera so last_image is always current and the
-        # recording gets every frame. rebind is atomic, so no lock needed.
-        while self.running:
-            ret, frame = self.camera.read()
-            if not ret:
-                continue
-            self.last_image = frame
-            self.out.write(frame)
 
     def is_blurry(self, image, threshold=800.0):
         """
@@ -123,15 +101,15 @@ class YoloDetectNode(Node):
         return laplacian, variance < threshold, variance
 
     def get_sharp_image(self):
-        # pull frames from the stream and return the first one that passes the
-        # blur test. returns immediately if the current frame is already crisp.
+        # read frames on demand and return the first that passes the blur test.
         # on timeout, return the sharpest frame seen so far (None if none arrived).
         deadline = time.time() + self.SHARP_TIMEOUT
         best_img = None
         best_var = -1.0
         while time.time() < deadline:
-            frame = None if self.last_image is None else self.last_image.copy()
-            if frame is None:
+            ret, frame = self.camera.read()
+            ret, frame = self.camera.read()
+            if not ret:
                 time.sleep(0.005)
                 continue
             _, blur, var = self.is_blurry(frame, self.BLUR_THRESHOLD)
@@ -140,9 +118,7 @@ class YoloDetectNode(Node):
             if var > best_var:
                 best_var = var
                 best_img = frame
-            time.sleep(0.005) # let the camera thread post a new frame
         return best_img
-
 
     # Inputs:
     #   pos - an array [x,y] of the center of the object, in pixels. [0,0] is at top left of image.
@@ -305,8 +281,6 @@ class YoloDetectNode(Node):
 
     def destroy_node(self):
         self.running = False
-        self.camera_thread.join(timeout=2.0)
-        self.out.release() 
         self.camera.release()
         super().destroy_node()
 
