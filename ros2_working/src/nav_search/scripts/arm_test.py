@@ -16,7 +16,7 @@ class ArmSearchTestClient(Node):
         self.declare_parameter('start_angle', -3.1)
         self.declare_parameter('end_angle', 3.1)
         self.declare_parameter('num_steps', 10)
-        self.declare_parameter('min_confidence', 0.5)
+        self.declare_parameter('min_confidence', 0.7)
 
         self.start_angle = self.get_parameter('start_angle').value
         self.end_angle = self.get_parameter('end_angle').value

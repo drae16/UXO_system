@@ -28,7 +28,7 @@ class FlyDrone(Node):
         self._init_csv()
 
 
-        self.parrot = DroneAnafi(2,25,10)
+        self.parrot = DroneAnafi(5,6,25)
         self.planner = self.parrot.flight_planner
 
     def _init_csv(self):
@@ -63,7 +63,7 @@ class FlyDrone(Node):
         for column in range(col):
             for row in range(rows):
                 try:
-                    if self.parrot.move_straight(self.parrot.coverage):
+                    if self.parrot.move_straight(self.parrot.coverage_x):
                         self.get_logger().info('Taking RGB image')
 
                         result, pos = self.parrot.take_photo_rgb()
@@ -89,10 +89,9 @@ class FlyDrone(Node):
             try:
                     mod = dir_counter ** column 
                     self.parrot.rotate()
-                    self.parrot.move_right(mod*self.parrot.coverage)
-                    
+                    self.parrot.move_right(mod*self.parrot.coverage_x)
             except Exception as e: 
-                self.logger.error(f'Failed scan step: {e}')
+                self.get_logger.error(f'Failed scan step: {e}')
 
     def land(self):
         self.parrot.land()

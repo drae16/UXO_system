@@ -102,7 +102,7 @@ public:
     // --- FSM tunables ---
     max_sweeps_             = this->declare_parameter<int>("max_sweeps", 1);
     desired_final_distance_ = this->declare_parameter<double>("desired_final_distance", 0.40);
-    nav2_switch_distance_   = this->declare_parameter<double>("nav2_switch_distance", 0.90);
+    nav2_switch_distance_   = this->declare_parameter<double>("nav2_switch_distance", 1.30);
     nav2_approach_margin_   = this->declare_parameter<double>("nav2_approach_margin", 0.3);
 
     local_recovery_waist_range_deg_ = this->declare_parameter<double>("local_recovery_waist_range_deg", 15.0);
@@ -779,6 +779,8 @@ private:
 
     double vx = dx / dist, vy = dy / dist;
     double goal_dist_from_robot = dist - desired_dist;
+    RCLCPP_INFO(get_logger(), "[DEBUGG] goal dist from robot = %.2f",
+                  goal_dist_from_robot);
     double gx = rx + vx * goal_dist_from_robot;
     double gy = ry + vy * goal_dist_from_robot;
     double goal_yaw = std::atan2(dy, dx);
@@ -939,7 +941,7 @@ private:
       return true;
     }
 
-    const double duration = move_dist / forward_speed;
+    const double duration = move_dist * 0.60 / forward_speed;
     RCLCPP_INFO(get_logger(), "Driving relative: dist=%.2f m vx=%.2f dur=%.2f s",
                 move_dist, forward_speed, duration);
 
@@ -1181,7 +1183,7 @@ private:
           RCLCPP_INFO(get_logger(), "[EVALUATE_DISTANCE] dist=%.3f (nav2_switch=%.2f final=%.2f)",
                       ctx.current_distance_to_target, nav2_switch_distance_, desired_final_distance_);
 
-          if (ctx.current_distance_to_target > nav2_switch_distance_) {
+          if (ctx.current_distance_to_target > nav2_switch_distance_ + nav2_approach_margin_) {
             state = ScanState::NAV2_APPROACH;
           } else if (ctx.current_distance_to_target > desired_final_distance_) {
             state = ScanState::VELOCITY_APPROACH;
@@ -1194,7 +1196,7 @@ private:
         case ScanState::NAV2_APPROACH: {
           move_arm_to_stow_pose();
 
-          double goal_dist = std::max(0.0, nav2_switch_distance_ - nav2_approach_margin_);
+          double goal_dist = nav2_switch_distance_;
           if (!step_nav2_towards_target(ctx.target_x_odom, ctx.target_y_odom, goal_dist, 0.0)) {
             RCLCPP_WARN(get_logger(), "[NAV2_APPROACH] Nav2 step failed");
             state = ScanState::LOCAL_RECOVERY;
@@ -1251,7 +1253,7 @@ private:
             break;
           }
 
-          rclcpp::sleep_for(500ms);   // let the estimator settle before re-aiming
+          rclcpp::sleep_for(1s);   // let the estimator settle before re-aiming
 
           double xb, yb;
           if (track_target_once(ctx.target_x_odom, ctx.target_y_odom) &&

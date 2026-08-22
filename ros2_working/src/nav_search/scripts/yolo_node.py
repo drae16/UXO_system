@@ -54,8 +54,8 @@ class YoloDetectNode(Node):
 
         self.camera = cv.VideoCapture(2)
         self.camera.set(cv.CAP_PROP_FOURCC, cv.VideoWriter_fourcc(*"MJPG"))
-        self.camera.set(cv.CAP_PROP_FRAME_WIDTH,  640)
-        self.camera.set(cv.CAP_PROP_FRAME_HEIGHT, 480)
+        self.camera.set(cv.CAP_PROP_FRAME_WIDTH,  1280)
+        self.camera.set(cv.CAP_PROP_FRAME_HEIGHT, 960)
         self.camera.set(cv.CAP_PROP_BUFFERSIZE, 1)
 
         actual_w = self.camera.get(cv.CAP_PROP_FRAME_WIDTH)
@@ -69,8 +69,8 @@ class YoloDetectNode(Node):
             self.execute_cb,
         )
 
-        self.FOCAL_LENGTH = 508.3
-        self.IMAGE_SIZE = (640,480) # Image size in pixels
+        self.FOCAL_LENGTH = 1016.6 #508.3
+        self.IMAGE_SIZE = (1280,960) # Image size in pixels
         self.lens = ct.BrownLensDistortion(0.0510, -0.386, 0.0)
         self.POS_X = 0 # x location of camera in meters (relative frame of reference for image info)
         self.POS_Y = 0
@@ -79,11 +79,11 @@ class YoloDetectNode(Node):
         self.HEADING = 0
         self.ROLL = 0
         self.objheight = 0
-        self.BLUR_THRESHOLD = 800.0
-        self.SHARP_TIMEOUT = 1.0 # seconds to wait for a sharp frame before giving up
+        self.BLUR_THRESHOLD = 1000.0
+        self.SHARP_TIMEOUT = 5.0 # seconds to wait for a sharp frame before giving up
 
 
-    def is_blurry(self, image, threshold=800.0):
+    def is_blurry(self, image, threshold=1000.0):
         """
         Detect if an image is blurry using the Laplacian variance method.
 

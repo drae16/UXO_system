@@ -111,7 +111,8 @@ class Go2NodeFactory:
                     }],
                     arguments=[self.config.config_paths['urdf']]
                 ),
-                self._create_pointcloud_to_laserscan_node()
+                #Remove launch for laser conversion as it consumes too many resources
+                #self._create_pointcloud_to_laserscan_node()
             ])
         else:
             # Multi-robot configuration
@@ -133,7 +134,8 @@ class Go2NodeFactory:
                         }],
                         arguments=[self.config.config_paths['urdf']]
                     ),
-                    self._create_pointcloud_to_laserscan_node(f"robot{i}")
+                    #Remove launch for laser conversion as it consumes too many resources
+                    #self._create_pointcloud_to_laserscan_node(f"robot{i}")
                 ])
         
         return nodes
@@ -193,6 +195,8 @@ class Go2NodeFactory:
                     'conn_type': self.config.conn_type
                 }],
             ),
+#Remove launch for these nodes as they are either unecessary or consume too much compute
+
             # LiDAR processing node (C++ implementation)
 #            Node(
  #               package='lidar_processor_cpp',
@@ -222,19 +226,19 @@ class Go2NodeFactory:
            #     }],
             #),
             # TTS Node (new separate package)
-            Node(
-                package='speech_processor',
-                executable='tts_node',
-                name='tts_node',
-                parameters=[{
-                    'api_key': os.getenv('ELEVENLABS_API_KEY', ''),
-                    'provider': 'elevenlabs',
-                    'voice_name': 'XrExE9yKIg1WjnnlVkGX',
-                    'local_playback': False,
-                    'use_cache': True,
-                    'audio_quality': 'standard'
-                }],
-            ),
+ #           Node(
+  #              package='speech_processor',
+   #             executable='tts_node',
+    #            name='tts_node',
+     #           parameters=[{
+      #              'api_key': os.getenv('ELEVENLABS_API_KEY', ''),
+       #             'provider': 'elevenlabs',
+        #            'voice_name': 'XrExE9yKIg1WjnnlVkGX',
+         #           'local_playback': False,
+          #          'use_cache': True,
+           #         'audio_quality': 'standard'
+            #    }],
+            #),
         ]
     
     def create_teleop_nodes(self) -> List[Node]:

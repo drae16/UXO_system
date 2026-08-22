@@ -46,7 +46,7 @@ photo_directory = r'/home/drl/Parrot_files/images/raw_images'
 
 detect_directory = r'/home/drl/Parrot_files/images/detections'
 
-model_path = r'/home/drl/poi_dog/ros2_working_ws/src/nav_search/models/pipes.pt'
+model_path = r'/home/drl/poi_dog/ros2_working_ws/ros2_working/src/nav_search/models/pipes.pt'
 
 
 RGB_PARAMS = {
@@ -272,8 +272,8 @@ class DroneAnafi:
 
         self.logger = getLogger("drone logger")
         self.alt = flight_altitude
-        self.coverage_x = 2* self.alt * math.tan((75*math.pi/180)/2)
-        self.coverage_y = 2* self.alt * math.tan((60*math.pi/180)/2)
+        self.coverage_x = 2* self.alt * math.tan((75*math.pi/180)/2) *.7
+        self.coverage_y = 2* self.alt * math.tan((60*math.pi/180)/2) *.7
 
         self.flight_planner = Planner(self.drone,distance_x=dis_x ,distance_y=dis_y, coverage_per_image_x=self.coverage_x, coverage_per_image_y = self.coverage_y)
 
