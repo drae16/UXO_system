@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
+
 import time
 import math
 import os
 import threading
+import datetime
 import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionServer
-from sensor_msgs.msg import Image
+from sensor_msgs.msg import Image, CompressedImage
 from tf2_ros import Buffer, TransformListener
 from nav_search.action import DetectTarget
 from ultralytics import YOLO
@@ -49,6 +51,11 @@ class YoloDetectNode(Node):
         )
         self.model = YOLO(model_path)
 
+        self.date_time = datetime.datetime.now()
+        self.save_path = f"/home/drl/Data/3D_const_images/{self.date_time}"
+        self.img_num = 0
+        
+    
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
 
@@ -61,6 +68,10 @@ class YoloDetectNode(Node):
         actual_w = self.camera.get(cv.CAP_PROP_FRAME_WIDTH)
         actual_h = self.camera.get(cv.CAP_PROP_FRAME_HEIGHT)
         self.get_logger().info(f"Resolution: {actual_w} x {actual_h}")
+
+
+
+        self.img_pub = self.create_publisher(CompressedImage, "sfm_img", 10)
 
         self.server = ActionServer(
             self,
@@ -79,9 +90,11 @@ class YoloDetectNode(Node):
         self.HEADING = 0
         self.ROLL = 0
         self.objheight = 0
-        self.BLUR_THRESHOLD = 1000.0
+        self.BLUR_THRESHOLD = 900.0
         self.SHARP_TIMEOUT = 5.0 # seconds to wait for a sharp frame before giving up
 
+
+        os.mkdir(self.save_path)
 
     def is_blurry(self, image, threshold=1000.0):
         """
@@ -154,41 +167,61 @@ class YoloDetectNode(Node):
 
         return objectPos
 
-
+    # ---- Dispatch on goal.mode: "move" | "cal" | "img" ----
     def execute_cb(self, goal_handle):
+        mode = goal_handle.request.mode
+        self.get_logger().info(f"execute_cb mode='{mode}'")
+
+        if mode == "move":
+            return self._do_move(goal_handle)
+        elif mode == "cal":
+            return self._do_cal(goal_handle)
+        elif mode == "img":
+            return self._do_img(goal_handle)
+        else:
+            self.get_logger().error(f"unknown mode '{mode}'")
+            result = self._blank_result()
+            goal_handle.abort()
+            return result
+
+    # Union result with every field zeroed; each mode fills what it needs.
+    def _blank_result(self):
+        result = DetectTarget.Result()
+        result.found = False
+        result.x_base = 0.0
+        result.y_base = 0.0
+        result.confidence = 0.0
+        result.coverage = 0.0
+        result.near_x1 = 0.0
+        result.near_y1 = 0.0
+        result.near_x2 = 0.0
+        result.near_y2 = 0.0
+        return result
+
+    # ---- move: metric detection + nearest corners (arm base frame) ----
+    def _do_move(self, goal_handle):
         min_conf = goal_handle.request.min_confidence
         feedback = DetectTarget.Feedback()
         feedback.progress = 0.0
         goal_handle.publish_feedback(feedback)
 
-        img = self.get_sharp_image()
+        result = self._blank_result()
 
+        img = self.get_sharp_image()
         if img is None:
             self.get_logger().info(f"failure")
-            result = DetectTarget.Result()
-            result.found = False
-            result.x_base = 0.0
-            result.y_base = 0.0
-            result.confidence = 0.0
             goal_handle.abort()
             return result
 
         self.get_logger().info(f"image received")
 
-        # 1) YOLO detect
-        results = self.model.predict(img,conf=0.7,show=True)[0]
+        results = self.model.predict(img, conf=min_conf, show=False)[0]
         boxes = results.boxes
 
         if boxes is None or len(boxes) == 0:
-            result = DetectTarget.Result()
-            result.found = False
-            result.x_base = 0.0
-            result.y_base = 0.0
-            result.confidence = 0.0
             goal_handle.succeed()
             return result
 
-        # pick best box above threshold
         best = None
         best_conf = 0.0
         for b in boxes:
@@ -197,12 +230,7 @@ class YoloDetectNode(Node):
                 best = b
                 best_conf = conf
 
-        result = DetectTarget.Result()
         if best is None:
-            result.found = False
-            result.x_base = 0.0
-            result.y_base = 0.0
-            result.confidence = 0.0
             goal_handle.succeed()
             return result
 
@@ -223,14 +251,10 @@ class YoloDetectNode(Node):
 
         except Exception as e:
             self.get_logger().warn(f"TF lookup failed: {e}")
-            result.found = False
-            result.x_base = 0.0
-            result.y_base = 0.0
             result.confidence = best_conf
             goal_handle.succeed()
             return result
 
-        # 3) compute (x, y) of target
         x_min, y_min, x_max, y_max = best.xyxy[0].tolist()
         u = (x_min + x_max) / 2.0
         v = (y_min + y_max) / 2.0
@@ -245,7 +269,6 @@ class YoloDetectNode(Node):
 
         all_positions = self.spatial_transformation(all_points_px, "Z", 0)
 
-
         x_base, y_base, z_base = all_positions[0]
         result.found = True
         result.x_base = float(y_base)
@@ -254,7 +277,6 @@ class YoloDetectNode(Node):
         self.get_logger().info(f"Coordinates found x= {result.x_base},y = {result.y_base},z= {z_base}")
         self.get_logger().info(f"Coordinates found distance= {dist}")
         result.confidence = best_conf
-
 
         corner_candidates = []
         for (cx_base, cy_base, cz_base) in all_positions[1:]:
@@ -273,6 +295,99 @@ class YoloDetectNode(Node):
             f"Nearest corners: ({result.near_x1:.3f},{result.near_y1:.3f}) dist={corner_candidates[0][0]:.3f}, "
             f"({result.near_x2:.3f},{result.near_y2:.3f}) dist={corner_candidates[1][0]:.3f}"
         )
+
+        feedback.progress = 100.0
+        goal_handle.publish_feedback(feedback)
+        goal_handle.succeed()
+        return result
+
+    # ---- cal: pixel center + frame coverage ----
+    def _do_cal(self, goal_handle):
+        min_conf = goal_handle.request.min_confidence
+        feedback = DetectTarget.Feedback()
+        feedback.progress = 0.0
+        goal_handle.publish_feedback(feedback)
+
+        result = self._blank_result()
+
+        img = self.get_sharp_image()
+        if img is None:
+            self.get_logger().info(f"failure")
+            goal_handle.abort()
+            return result
+
+        self.get_logger().info(f"image received")
+
+        results = self.model.predict(img, conf=min_conf, show=True)[0]
+        boxes = results.boxes
+
+        if boxes is None or len(boxes) == 0:
+            goal_handle.succeed()
+            return result
+
+        best = None
+        best_conf = 0.0
+        for b in boxes:
+            conf = float(b.conf[0])
+            if conf > min_conf and conf > best_conf:
+                best = b
+                best_conf = conf
+
+        if best is None:
+            goal_handle.succeed()
+            return result
+
+        x_min, y_min, x_max, y_max = best.xyxy[0].tolist()
+        w_px, h_px = self.IMAGE_SIZE
+        coverage = ((x_max - x_min) * (y_max - y_min)) / (w_px * h_px)
+        print("PIxel Coverage:",(x_max - x_min) ,(y_max - y_min))
+        u = (x_min + x_max) / 2.0
+        v = (y_min + y_max) / 2.0
+
+        result.found = True
+        result.x_base = float(u)          # pixel u (see .action note)
+        result.y_base = float(v)          # pixel v
+        result.confidence = best_conf
+        result.coverage = float(coverage)
+
+        self.get_logger().info(f"target in frame, center at u= {u}, v = {v}")
+        self.get_logger().info(f"Target consuming {coverage} of frame")
+
+        feedback.progress = 100.0
+        goal_handle.publish_feedback(feedback)
+        goal_handle.succeed()
+        return result
+
+    # ---- img: grab a sharp frame, PNG-compress, publish on sfm_img ----
+    def _do_img(self, goal_handle):
+        feedback = DetectTarget.Feedback()
+        feedback.progress = 0.0
+        goal_handle.publish_feedback(feedback)
+
+        result = self._blank_result()
+
+        img = self.get_sharp_image()
+        if img is None:
+            self.get_logger().info(f"img: no sharp frame")
+            goal_handle.abort()
+            return result
+        cv.imwrite(f"{self.save_path}/img{self.img_num}.png",img)
+        self.img_num += 1
+        ok, buf = cv.imencode(".png", img)
+        if not ok:
+            self.get_logger().error("img: PNG encode failed")
+            goal_handle.abort()
+            return result
+
+        msg = CompressedImage()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = "vx300s/camera_link"
+        msg.format = "png"
+        msg.data = buf.tobytes()
+        self.img_pub.publish(msg)
+
+        result.found = True
+        self.get_logger().info(f"img: published {len(msg.data)} byte PNG on sfm_img")
 
         feedback.progress = 100.0
         goal_handle.publish_feedback(feedback)

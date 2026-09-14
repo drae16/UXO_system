@@ -29,6 +29,13 @@ def generate_launch_description():
 
         Node(
             package='nav_search',
+            executable='construct_target',
+            name='construct_target',
+            output='screen',
+        ),
+
+        Node(
+            package='nav_search',
             executable='yolo_node.py',
             name='yolo_node',
             output='screen',

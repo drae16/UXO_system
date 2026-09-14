@@ -1,14 +1,16 @@
 # Goal
 float32 min_confidence
+string  mode              # "move" | "cal" | "img"
 ---
 # Result
-bool    found
-float32 x_base
-float32 y_base
-float32 confidence
-float32 near_x1
+bool    found             # move/cal: target detected | img: captured & published
+float32 x_base            # move: metric x (arm base) | cal: pixel u
+float32 y_base            # move: metric y (arm base) | cal: pixel v
+float32 confidence        # move/cal: best box conf   | img: 0
+float32 coverage          # cal: bbox frac of frame   | move/img: 0
+float32 near_x1           # move: nearest corner x     | cal/img: 0
 float32 near_y1
-float32 near_x2
+float32 near_x2           # move: 2nd nearest corner x | cal/img: 0
 float32 near_y2
 ---
 # Feedback

@@ -675,6 +675,7 @@ private:
     }
 
     auto goal_msg = DetectTarget::Goal();
+    goal_msg.mode = "move";
     goal_msg.min_confidence = static_cast<float>(min_conf);
 
     auto future_goal = detect_client_->async_send_goal(goal_msg, DetectClient::SendGoalOptions());
@@ -1304,7 +1305,7 @@ private:
           RCLCPP_INFO(get_logger(), "Scan complete: target at (%.3f, %.3f) odom",
                       ctx.target_x_odom, ctx.target_y_odom);
           rclcpp::sleep_for(200ms);
-          move_arm_to_stow_pose();
+          ///move_arm_to_stow_pose();
           goal_handle->succeed(result);
           return;
         }

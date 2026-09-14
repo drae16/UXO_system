@@ -15,6 +15,7 @@ from sensor_msgs.msg import NavSatFix
 from robot_localization.srv import FromLL
 from std_msgs.msg import Empty
 from nav_search.action import ScanArea 
+from nav_search.action import Reconstruct
 
 def yaw_to_quat(yaw: float) -> Quaternion:
     q = Quaternion()
@@ -42,6 +43,7 @@ class GPSNavigator:
         self.node = node
         self.client = ActionClient(node, NavigateToPose, "navigate_to_pose")
         self.scan_client = ActionClient(node, ScanArea, '/scan_area')
+        self.reconstruct_client = ActionClient(node, Reconstruct, '/reconstruct_target')
         # Ensure action server is up
         while not self.client.wait_for_server(timeout_sec=1.0):
             node.get_logger().info("Waiting for NavigateToPose action server...")
@@ -133,6 +135,48 @@ class GPSNavigator:
             self.node.get_logger().info('ScanArea: no target found')
 
         return result
+
+    def call_3d_reconstruction(self) -> Reconstruct.Result | None:
+            # Wait for server
+            if not self.reconstruct_client.wait_for_server(timeout_sec=5.0):
+                self.node.get_logger().error('3D reconstruct action server not available')
+                return None
+    
+            goal = Reconstruct.Goal()
+            goal.min_confidence = 0.7
+    
+            # Send goal
+            send_future = self.reconstruct_client.send_goal_async(goal)
+    
+            # Busy-wait like you do for Nav2
+            while rclpy.ok() and not send_future.done():
+                time.sleep(0.01)
+    
+            goal_handle = send_future.result()
+            if not goal_handle or not goal_handle.accepted:
+                self.node.get_logger().warn('Reconstruct goal was rejected')
+                return None
+    
+            # Wait for result
+            result_future = self.reconstruct_client._get_result_async(goal_handle)
+            while rclpy.ok() and not result_future.done():
+                time.sleep(0.05)
+    
+            wrapped_result = result_future.result()
+            result = wrapped_result.result
+    
+            if result is None:
+                self.node.get_logger().warn('Reconstruct returned no result message')
+                return None
+    
+            if result.success:
+                self.node.get_logger().info(
+                    f'(Recontstruction complete)'
+                )
+            else:
+                self.node.get_logger().info('ScanArea: no target found')
+    
+            return result
 
     def _on_feedback(self, feedback_msg):
         fb = feedback_msg.feedback
@@ -274,12 +318,49 @@ class GPSNode(Node):
         self.publisher_command.publish(msg)
         self.get_logger().info('Performing stretch')
 
+    def go_prone(self):
+        msg = WebRtcReq()
+        msg.api_id = 1005
+        msg.topic = 'rt/api/sport/request'
+        self.publisher_command.publish(msg)
+        self.get_logger().info('Going prone')    
+
+    def stand_up(self):
+        msg = WebRtcReq()
+        msg.api_id = 1004
+        msg.topic = 'rt/api/sport/request'
+        self.publisher_command.publish(msg)
+        self.get_logger().info('Standing Up')      
+
+    def enable_move(self):
+        msg = WebRtcReq()
+        msg.api_id = 1002
+        msg.topic = 'rt/api/sport/request'
+        self.publisher_command.publish(msg)
+        self.get_logger().info('Ready to move')         
+
     def run_task_for(self,pose: PoseStamped):
         x = pose.pose.position.x
         y = pose.pose.position.y
         self.get_logger().info(f'Running task at waypoint ({x:.2f}, {y:.2f})')
 
-        scan = self.navigator.call_scan_area()
+            
+        #scan = self.navigator.call_scan_area()
+
+        #if scan.found:
+        self.go_prone()
+        time.sleep(1)
+        #else:
+            #return
+
+        #construct = self.navigator.call_3d_reconstruction()
+
+        #if construct:
+        self.stand_up()
+        time.sleep(2)
+        self.enable_move()
+
+
         
 
 

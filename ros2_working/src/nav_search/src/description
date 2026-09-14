@@ -1,6 +1,1039 @@
-original (arm using nav2)
-rev2: (arm using vel_cmd)
-rev3: (arm using nav2 working)
-rev4: arm using nav2 and cmd with arm tracking move it (trackes whole time)
-rev5 arm using nav2 an cmd with arm tracking servo
-rev6: arm using nav2 and cmd with arm tracking move it (trackes at beginning and end)
+#include <chrono>
+#include <memory>
+#include <string>
+#include <map>
+#include <thread>
+#include <future>
+#include <cmath>
+#include <mutex>
+#include <algorithm>
+#include <array>
+
+#include <sensor_msgs/msg/joint_state.hpp>
+#include <interbotix_xs_msgs/msg/joint_single_command.hpp>
+#include <std_srvs/srv/set_bool.hpp>
+
+#include <rclcpp/rclcpp.hpp>
+#include <rclcpp_action/rclcpp_action.hpp>
+#include <rclcpp/parameter_client.hpp>
+
+#include <geometry_msgs/msg/pose_stamped.hpp>
+#include <geometry_msgs/msg/twist.hpp>
+#include <moveit/move_group_interface/move_group_interface.h>
+#include <moveit/planning_scene_interface/planning_scene_interface.h>
+#include <moveit_msgs/msg/collision_object.hpp>
+#include <moveit_msgs/msg/attached_collision_object.hpp>
+#include <moveit_msgs/msg/robot_trajectory.hpp>
+#include <shape_msgs/msg/solid_primitive.hpp>
+#include <nav_msgs/msg/odometry.hpp>
+
+#include <tf2_ros/buffer.h>
+#include <tf2_ros/transform_listener.h>
+#include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
+#include <tf2/LinearMath/Quaternion.h>
+#include <tf2/LinearMath/Matrix3x3.h>
+#include <tf2/LinearMath/Vector3.h>
+
+#include "nav_search/action/detect_target.hpp"
+#include "nav_search/action/reconstruct.hpp"
+
+
+using namespace std::chrono_literals;
+
+
+class ReconstructNode : public rclcpp::Node
+{
+public:
+  using Reconstruct      = nav_search::action::Reconstruct ;
+  using ScanServer     = rclcpp_action::Server<Reconstruct>;
+  using ScanGoalHandle = rclcpp_action::ServerGoalHandle<Reconstruct>;
+
+  using DetectTarget   = nav_search::action::DetectTarget;
+  using DetectClient   = rclcpp_action::Client<DetectTarget>;
+
+  ReconstructNode()
+  : Node("reconstruct_scan")
+  {
+    // --- Frames / joints ---
+    planning_group_   = this->declare_parameter<std::string>("planning_group", "interbotix_arm");
+    base_joint_name_  = this->declare_parameter<std::string>("base_joint_name", "waist");
+    wrist_joint_name_ = this->declare_parameter<std::string>("wrist_joint_name", "wrist_angle");
+    arm_base_frame_   = this->declare_parameter<std::string>("arm_base_frame", "vx300s/base_link");
+    ee_link_          = this->declare_parameter<std::string>("ee_link", "vx300s/ee_gripper_link");
+    cam_link_         = this->declare_parameter<std::string>("cam_link", "vx300s/camera_link");
+
+    //Publishers
+
+    cmd_vel_pub_ = this->create_publisher<geometry_msgs::msg::Twist>(
+      "/cmd_vel_out", 10);
+
+    joint_single_pub_ = this->create_publisher<interbotix_xs_msgs::msg::JointSingleCommand>(
+      "/vx300s/commands/joint_single", 10);
+
+    // Subs
+
+    joint_state_sub_ = this->create_subscription<sensor_msgs::msg::JointState>(
+      "/vx300s/joint_states", 10,
+      std::bind(&ReconstructNode::joint_state_callback, this, std::placeholders::_1));
+
+    RCLCPP_INFO(get_logger(), "Planning group: %s", planning_group_.c_str());
+    RCLCPP_INFO(get_logger(), "Arm base frame: %s", arm_base_frame_.c_str());
+    RCLCPP_INFO(get_logger(), "EE link: %s / Camera link: %s", ee_link_.c_str(), cam_link_.c_str());
+
+    // --- TF ---
+    tf_buffer_   = std::make_shared<tf2_ros::Buffer>(this->get_clock());
+    tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
+
+    //server create
+    reconstruction_server= rclcpp_action::create_server<Reconstruct>(
+      this, "reconstruct_target",
+      std::bind(&ReconstructNode::handle_scan_goal,     this, std::placeholders::_1, std::placeholders::_2),
+      std::bind(&ReconstructNode::handle_scan_cancel,   this, std::placeholders::_1),
+      std::bind(&ReconstructNode::handle_scan_accepted, this, std::placeholders::_1));
+  }
+
+private:
+  // === Lazy init helpers ====================================================
+
+  void init_move_group_if_needed()
+  {
+    if (move_group_) return;
+
+    RCLCPP_INFO(get_logger(), "Fetching robot_description and SRDF from /move_group...");
+
+    auto param_node = rclcpp::Node::make_shared("arm_search_param_client");
+    const std::string move_group_node_name = "/move_group";
+
+    auto param_client = std::make_shared<rclcpp::AsyncParametersClient>(
+      param_node, move_group_node_name);
+
+    while (!param_client->wait_for_service(1s)) {
+      if (!rclcpp::ok()) {
+        RCLCPP_ERROR(get_logger(), "Interrupted waiting for %s param service.",
+                     move_group_node_name.c_str());
+        return;
+      }
+      RCLCPP_INFO(get_logger(), "Waiting for %s parameter service...",
+                  move_group_node_name.c_str());
+    }
+
+    auto future = param_client->get_parameters(
+      {"robot_description", "robot_description_semantic"});
+
+    rclcpp::executors::SingleThreadedExecutor exec;
+    exec.add_node(param_node);
+    auto ret = exec.spin_until_future_complete(future, 5s);
+    exec.remove_node(param_node);
+
+    if (ret != rclcpp::FutureReturnCode::SUCCESS) {
+      RCLCPP_ERROR(get_logger(), "Timed out getting parameters from %s",
+                   move_group_node_name.c_str());
+      return;
+    }
+
+    auto params = future.get();
+    if (!this->has_parameter("robot_description")) {
+      this->declare_parameter<std::string>("robot_description", "");
+    }
+    if (!this->has_parameter("robot_description_semantic")) {
+      this->declare_parameter<std::string>("robot_description_semantic", "");
+    }
+    this->set_parameters(params);
+
+    RCLCPP_INFO(get_logger(), "Initializing MoveGroupInterface...");
+    move_group_ = std::make_shared<moveit::planning_interface::MoveGroupInterface>(
+      shared_from_this(), planning_group_);
+    move_group_->setPlanningTime(3.0);
+
+    RCLCPP_INFO(get_logger(), "MoveGroup planning frame: %s",
+                move_group_->getPlanningFrame().c_str());
+  }
+
+  void init_detect_client_if_needed()
+  {
+    if (!detect_client_) {
+      detect_client_ = rclcpp_action::create_client<DetectTarget>(
+        shared_from_this(), "detect_target");
+    }
+  }
+
+
+ // === Action Callbacks============================================
+  rclcpp_action::GoalResponse handle_scan_goal(
+    const rclcpp_action::GoalUUID &,
+    std::shared_ptr<const Reconstruct::Goal> goal)
+  {
+    (void)goal;
+    RCLCPP_INFO(get_logger(), "Received 3D Scan goal");
+    return rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE;
+  }
+
+  rclcpp_action::CancelResponse handle_scan_cancel(const std::shared_ptr<ScanGoalHandle>)
+  {
+    RCLCPP_INFO(get_logger(), " goal cancel requested");
+    return rclcpp_action::CancelResponse::ACCEPT;
+  }
+
+
+  void handle_scan_accepted(const std::shared_ptr<ScanGoalHandle> goal_handle)
+  {
+    std::thread(&ReconstructNode::main_image_collection, this, goal_handle).detach();
+  }
+
+
+  // === Joint state cache ====================================================
+
+  void joint_state_callback(const sensor_msgs::msg::JointState::SharedPtr msg)
+  {
+    std::lock_guard<std::mutex> lock(joint_state_mutex_);
+    for (size_t i = 0; i < msg->name.size(); ++i) {
+      latest_joint_positions_[msg->name[i]] = msg->position[i];
+    }
+  }
+
+  bool get_joint_position(const std::string &joint_name, double &position)
+  {
+    std::lock_guard<std::mutex> lock(joint_state_mutex_);
+    auto it = latest_joint_positions_.find(joint_name);
+    if (it == latest_joint_positions_.end()) return false;
+    position = it->second;
+    return true;
+  }
+
+  // Publish a single-joint position command and poll joint_states until the
+  // joint settles at the target (or times out). Mirrors the search node.
+  bool move_single_joint(const std::string &joint_name, double target_angle)
+  {
+    if (!joint_single_pub_) {
+      RCLCPP_ERROR(get_logger(), "joint_single_pub_ not initialized");
+      return false;
+    }
+
+    interbotix_xs_msgs::msg::JointSingleCommand cmd;
+    cmd.name = joint_name;
+    cmd.cmd  = static_cast<float>(target_angle);
+    joint_single_pub_->publish(cmd);
+
+    rclcpp::Rate rate(joint_poll_rate_hz_);
+    auto start_time = this->now();
+    int consecutive_ok = 0;
+
+    while (rclcpp::ok()) {
+      if ((this->now() - start_time).seconds() > joint_move_timeout_) {
+        RCLCPP_WARN(get_logger(), "Timeout waiting for joint '%s' -> %.3f rad",
+                    joint_name.c_str(), target_angle);
+        return false;
+      }
+      double current_pos;
+      if (get_joint_position(joint_name, current_pos)) {
+        if (std::fabs(current_pos - target_angle) < joint_move_tolerance_) {
+          if (++consecutive_ok >= 2) return true;
+        } else {
+          consecutive_ok = 0;
+        }
+      }
+      rate.sleep();
+    }
+    return false;
+  }
+
+  // Move a joint by a RELATIVE delta from its current position.
+  bool nudge_joint(const std::string &joint_name, double delta)
+  {
+    double cur;
+    if (!get_joint_position(joint_name, cur)) {
+      RCLCPP_WARN(get_logger(), "No joint state for '%s'; cannot nudge", joint_name.c_str());
+      return false;
+    }
+    return move_single_joint(joint_name, cur + delta);
+  }
+
+  //set planning scene function
+
+  // Add the static world obstacles (ground plane, dog body) and the attached
+  // camera box. Called once after the move group is up, before any planning.
+  // All dimensions are placeholders -- MEASURE and replace.
+  void setup_planning_scene()
+  {
+    // ---- MEASURE THESE ----
+    const double ground_size_xy = 3.0;    // m, plane extent (square)
+    const double ground_thick   = 0.02;   // m, box thickness
+    const double ground_z       = 0.0;    // m in base_footprint (top at ground)
+
+    const double dog_len_x = 0.70;        // m, fore-aft
+    const double dog_wid_y = 0.32;        // m, lateral
+    const double dog_hgt_z = 0.22;        // m, height of the body block
+    const double dog_cx = 0.0;
+    const double dog_cy = 0.0;
+    const double dog_cz = -0.5 * dog_hgt_z - 0.02;
+
+    const double gps_len_x = 0.10;        // m
+    const double gps_wid_y = 0.08;        // m
+    const double gps_hgt_z = 0.04;        // m
+    const double gps_cx = 0.18;
+    const double gps_cy = 0.0;
+    const double gps_cz = 0.0;
+
+    const double cam_len_x = 0.06;        // m
+    const double cam_wid_y = 0.06;        // m
+    const double cam_hgt_z = 0.08;        // m
+    const double cam_cx = 0.0;
+    const double cam_cy = 0.0;
+    const double cam_cz = 0.0;
+
+
+
+
+    // -----------------------
+
+    moveit::planning_interface::PlanningSceneInterface psi;
+    std::vector<moveit_msgs::msg::CollisionObject> world_objects;
+
+    // --- Ground plane (world object, base_footprint) ---
+    {
+      moveit_msgs::msg::CollisionObject ground;
+      ground.id = "ground_plane";
+      ground.header.frame_id = "base_footprint";
+
+      shape_msgs::msg::SolidPrimitive box;
+      box.type = shape_msgs::msg::SolidPrimitive::BOX;
+      box.dimensions = {ground_size_xy, ground_size_xy, ground_thick};
+
+      geometry_msgs::msg::Pose pose;
+      pose.orientation.w = 1.0;
+      pose.position.x = 0.0;
+      pose.position.y = 0.0;
+      pose.position.z = ground_z - 0.5 * ground_thick;
+
+      ground.primitives.push_back(box);
+      ground.primitive_poses.push_back(pose);
+      ground.operation = moveit_msgs::msg::CollisionObject::ADD;
+      world_objects.push_back(ground);
+    }
+
+    // --- Dog body block (world object, arm base frame) ---
+    {
+      moveit_msgs::msg::CollisionObject dog;
+      dog.id = "dog_body";
+      dog.header.frame_id = arm_base_frame_;
+
+      shape_msgs::msg::SolidPrimitive box;
+      box.type = shape_msgs::msg::SolidPrimitive::BOX;
+      box.dimensions = {dog_len_x, dog_wid_y, dog_hgt_z};
+
+      geometry_msgs::msg::Pose pose;
+      pose.orientation.w = 1.0;
+      pose.position.x = dog_cx;
+      pose.position.y = dog_cy;
+      pose.position.z = dog_cz;
+
+      dog.primitives.push_back(box);
+      dog.primitive_poses.push_back(pose);
+      dog.operation = moveit_msgs::msg::CollisionObject::ADD;
+      world_objects.push_back(dog);
+    }
+
+    {
+      moveit_msgs::msg::CollisionObject gps;
+      gps.id = "gps_body";
+      gps.header.frame_id = arm_base_frame_;
+
+      shape_msgs::msg::SolidPrimitive box;
+      box.type = shape_msgs::msg::SolidPrimitive::BOX;
+      box.dimensions = {gps_len_x, gps_wid_y, gps_hgt_z};
+
+      geometry_msgs::msg::Pose pose;
+      pose.orientation.w = 1.0;
+      pose.position.x = gps_cx;
+      pose.position.y = gps_cy;
+      pose.position.z = gps_cz;
+
+      gps.primitives.push_back(box);
+      gps.primitive_poses.push_back(pose);
+      gps.operation = moveit_msgs::msg::CollisionObject::ADD;
+      world_objects.push_back(gps);
+    }
+
+    if (!world_objects.empty()) {
+      psi.applyCollisionObjects(world_objects);
+      RCLCPP_INFO(get_logger(), "[Scene] applied %zu world obstacle(s)", world_objects.size());
+    }
+
+    // --- Camera box (ATTACHED to the EE link) ---
+    {
+      moveit_msgs::msg::AttachedCollisionObject cam;
+      cam.link_name = ee_link_;
+      cam.object.id = "camera_box";
+      cam.object.header.frame_id = ee_link_;
+
+      shape_msgs::msg::SolidPrimitive box;
+      box.type = shape_msgs::msg::SolidPrimitive::BOX;
+      box.dimensions = {cam_len_x, cam_wid_y, cam_hgt_z};
+
+      geometry_msgs::msg::Pose pose;
+      pose.orientation.w = 1.0;
+      pose.position.x = cam_cx;
+      pose.position.y = cam_cy;
+      pose.position.z = cam_cz;
+
+      cam.object.primitives.push_back(box);
+      cam.object.primitive_poses.push_back(pose);
+      cam.object.operation = moveit_msgs::msg::CollisionObject::ADD;
+      cam.touch_links = {ee_link_,
+              "vx300s/fingers_link"
+              "vx300s/gripper_link",
+              "vx300s/left_finger_link",
+              "vx300s/right_finger_link"};
+
+      psi.applyAttachedCollisionObject(cam);
+      RCLCPP_INFO(get_logger(), "[Scene] attached camera box to %s", ee_link_.c_str());
+    }
+  }
+
+
+  //Arm movement helpers
+
+  bool move_arm_to_pose(const geometry_msgs::msg::Pose &pose)
+  {
+    if (!move_group_) return false;
+
+    move_group_->setStartStateToCurrentState();
+    move_group_->setPoseTarget(pose, ee_link_);
+
+    moveit::planning_interface::MoveGroupInterface::Plan plan;
+    if (move_group_->plan(plan) != moveit::core::MoveItErrorCode::SUCCESS) {
+      RCLCPP_WARN(get_logger(), "No plan found for camera pose");
+      return false;
+    }
+    if (move_group_->execute(plan) != moveit::core::MoveItErrorCode::SUCCESS) {
+      RCLCPP_WARN(get_logger(), "Execution for camera pose failed");
+      return false;
+    }
+    return true;
+  }
+
+
+  bool move_arm_to_named(const char* name)
+  {
+    if (!move_group_) return false;
+
+    RCLCPP_INFO(get_logger(), "Moving arm to named state '%s'", name);
+    move_group_->setStartStateToCurrentState();
+    if (!move_group_->setNamedTarget(name)) {
+      RCLCPP_WARN(get_logger(), "Named target '%s' not found for group '%s'",
+                  name, planning_group_.c_str());
+      return false;
+    }
+
+    moveit::planning_interface::MoveGroupInterface::Plan plan;
+    if (move_group_->plan(plan) != moveit::core::MoveItErrorCode::SUCCESS) {
+      RCLCPP_WARN(get_logger(), "No plan found to '%s'", name);
+      return false;
+    }
+    if (move_group_->execute(plan) != moveit::core::MoveItErrorCode::SUCCESS) {
+      RCLCPP_WARN(get_logger(), "Execution to '%s' failed", name);
+      return false;
+    }
+    return true;
+  }
+
+  bool move_arm_to_search_pose() { return move_arm_to_named("Search"); }
+  bool move_arm_to_stow_pose()   { return move_arm_to_named("Sleep");  }
+
+
+  bool compute_ee_pose_hemisphere(const geometry_msgs::msg::Point &C,
+                                double R, double phi, double theta,
+                                geometry_msgs::msg::Pose &ee_pose_out)
+  {
+    const double sp = std::sin(phi), cp = std::cos(phi);
+    const double ct = std::cos(theta), st = std::sin(theta);
+
+    tf2::Vector3 cam_pos(C.x + R*sp*ct, C.y + R*sp*st, C.z + R*cp);
+
+    tf2::Vector3 x_axis(C.x - cam_pos.x(), C.y - cam_pos.y(), C.z - cam_pos.z());
+    if (x_axis.length2() < 1e-9) return false;
+    x_axis.normalize();
+
+    tf2::Vector3 world_up(0.0, 0.0, 1.0);
+    tf2::Vector3 y_axis = x_axis.cross(-world_up);
+    if (y_axis.length2() < 1e-6) y_axis = tf2::Vector3(0.0, 1.0, 0.0);  // pole fallback
+    y_axis.normalize();
+
+    tf2::Vector3 z_axis = x_axis.cross(y_axis);
+    z_axis.normalize();
+
+    tf2::Matrix3x3 Rm(
+      x_axis.x(), y_axis.x(), z_axis.x(),
+      x_axis.y(), y_axis.y(), z_axis.y(),
+      x_axis.z(), y_axis.z(), z_axis.z());
+    tf2::Quaternion q;
+    Rm.getRotation(q);
+    q.normalize();
+
+    geometry_msgs::msg::Pose cam_pose;
+    cam_pose.position.x = cam_pos.x();
+    cam_pose.position.y = cam_pos.y();
+    cam_pose.position.z = cam_pos.z();
+    cam_pose.orientation = tf2::toMsg(q);
+
+    return cameraPoseToEePoseInBase(cam_pose, ee_pose_out);
+  }
+
+
+  bool cameraPoseToEePoseInBase(const geometry_msgs::msg::Pose& cam_pose_in_base,
+                                geometry_msgs::msg::Pose& ee_pose_in_base)
+  {
+    geometry_msgs::msg::TransformStamped ee_to_cam;
+    try {
+      ee_to_cam = tf_buffer_->lookupTransform(ee_link_, cam_link_, tf2::TimePointZero);
+    } catch (const tf2::TransformException& ex) {
+      RCLCPP_WARN(get_logger(), "TF lookup %s->%s failed: %s",
+                  ee_link_.c_str(), cam_link_.c_str(), ex.what());
+      return false;
+    }
+
+    tf2::Transform T_base_cam, T_ee_cam;
+    tf2::fromMsg(cam_pose_in_base, T_base_cam);
+    tf2::fromMsg(ee_to_cam.transform, T_ee_cam);
+
+    tf2::Transform T_base_ee = T_base_cam * T_ee_cam.inverse();
+
+    ee_pose_in_base.position.x = T_base_ee.getOrigin().x();
+    ee_pose_in_base.position.y = T_base_ee.getOrigin().y();
+    ee_pose_in_base.position.z = T_base_ee.getOrigin().z();
+    ee_pose_in_base.orientation = tf2::toMsg(T_base_ee.getRotation());
+
+    double roll, pitch, yaw;
+    tf2::Matrix3x3(T_base_ee.getRotation()).getRPY(roll, pitch, yaw);
+    RCLCPP_INFO(get_logger(),
+      "EE pose in base: X=%.3f Y=%.3f Z=%.3f | RPY(deg) %.1f %.1f %.1f",
+      ee_pose_in_base.position.x, ee_pose_in_base.position.y, ee_pose_in_base.position.z,
+      roll * 180.0 / M_PI, pitch * 180.0 / M_PI, yaw * 180.0 / M_PI);
+    return true;
+  }
+
+
+  // === Detection clients =====================================================
+
+  // "cal" detect: returns center (u,v) pixels and coverage.
+  bool call_detect_target(double min_conf, double &u, double &v, double &coverage)
+  {
+    init_detect_client_if_needed();
+    if (!detect_client_) return false;
+
+    if (!detect_client_->wait_for_action_server(2s)) {
+      RCLCPP_WARN(get_logger(), "detect_target action server not available");
+      return false;
+    }
+    auto goal_msg = DetectTarget::Goal();
+    goal_msg.min_confidence = static_cast<float>(min_conf);
+    goal_msg.mode = "cal";
+
+    auto future_goal = detect_client_->async_send_goal(goal_msg, DetectClient::SendGoalOptions());
+    if (future_goal.wait_for(5s) != std::future_status::ready) {
+      RCLCPP_WARN(get_logger(), "Timeout waiting for detect_target goal response");
+      return false;
+    }
+    auto goal_handle = future_goal.get();
+    if (!goal_handle) {
+      RCLCPP_WARN(get_logger(), "detect_target goal rejected");
+      return false;
+    }
+
+    auto result_future = detect_client_->async_get_result(goal_handle);
+    if (result_future.wait_for(10s) != std::future_status::ready) {
+      RCLCPP_WARN(get_logger(), "Timeout waiting for detect_target result");
+      return false;
+    }
+
+    auto result = result_future.get().result;
+    if (!result || !result->found) {
+      RCLCPP_INFO(get_logger(), "detect_target: no target found");
+      return false;
+    }
+
+    u = result->x_base;  v = result->y_base; coverage = result->coverage;
+    return true;
+  }
+
+  bool call_detect_target_move(double min_conf, double &x, double &y)
+  {
+    double nx1, ny1, nx2, ny2;
+    return call_detect_target_move(min_conf, x, y, nx1, ny1, nx2, ny2);
+  }
+
+  bool call_detect_target_move(double min_conf, double &x, double &y,
+                          double &near_x1, double &near_y1,
+                          double &near_x2, double &near_y2)
+  {
+    init_detect_client_if_needed();
+    if (!detect_client_) return false;
+
+    if (!detect_client_->wait_for_action_server(2s)) {
+      RCLCPP_WARN(get_logger(), "detect_target action server not available");
+      return false;
+    }
+
+    auto goal_msg = DetectTarget::Goal();
+    goal_msg.mode = "move";
+    goal_msg.min_confidence = static_cast<float>(min_conf);
+
+    auto future_goal = detect_client_->async_send_goal(goal_msg, DetectClient::SendGoalOptions());
+    if (future_goal.wait_for(5s) != std::future_status::ready) {
+      RCLCPP_WARN(get_logger(), "Timeout waiting for detect_target goal response");
+      return false;
+    }
+    auto goal_handle = future_goal.get();
+    if (!goal_handle) {
+      RCLCPP_WARN(get_logger(), "detect_target goal rejected");
+      return false;
+    }
+
+    auto result_future = detect_client_->async_get_result(goal_handle);
+    if (result_future.wait_for(10s) != std::future_status::ready) {
+      RCLCPP_WARN(get_logger(), "Timeout waiting for detect_target result");
+      return false;
+    }
+
+    auto result = result_future.get().result;
+    if (!result || !result->found) {
+      RCLCPP_INFO(get_logger(), "detect_target: no target found");
+      return false;
+    }
+
+    x = result->x_base;   y = result->y_base;
+    near_x1 = result->near_x1; near_y1 = result->near_y1;
+    near_x2 = result->near_x2; near_y2 = result->near_y2;
+
+    RCLCPP_INFO(get_logger(),
+      "detect_target: (%.2f, %.2f) arm base, corners (%.2f,%.2f) (%.2f,%.2f)",
+      x, y, near_x1, near_y1, near_x2, near_y2);
+    return true;
+  }
+
+  // "img" capture: grab a sharp frame, PNG-compress, publish on sfm_img.
+  bool capture_image()
+  {
+    init_detect_client_if_needed();
+    if (!detect_client_) return false;
+
+    if (!detect_client_->wait_for_action_server(2s)) {
+      RCLCPP_WARN(get_logger(), "detect_target action server not available");
+      return false;
+    }
+    auto goal_msg = DetectTarget::Goal();
+    goal_msg.mode = "img";
+
+    auto future_goal = detect_client_->async_send_goal(goal_msg, DetectClient::SendGoalOptions());
+    if (future_goal.wait_for(5s) != std::future_status::ready) {
+      RCLCPP_WARN(get_logger(), "Timeout waiting for detect_target goal response");
+      return false;
+    }
+    auto goal_handle = future_goal.get();
+    if (!goal_handle) {
+      RCLCPP_WARN(get_logger(), "detect_target goal rejected");
+      return false;
+    }
+
+    auto result_future = detect_client_->async_get_result(goal_handle);
+    if (result_future.wait_for(10s) != std::future_status::ready) {
+      RCLCPP_WARN(get_logger(), "Timeout waiting for detect_target result");
+      return false;
+    }
+
+    auto result = result_future.get().result;
+    if (!result || !result->found) {
+      RCLCPP_INFO(get_logger(), "Image Collection unsuccessful");
+      return false;
+    }
+    return true;
+  }
+
+
+  // === Pixel-space visual servoing ==========================================
+
+  // Read the target's pixel error from image center via a "cal" detection.
+  // Returns (du, dv) = (u - cx, v - cy). Settles first.
+  bool read_pixel_error(double min_conf, double &du, double &dv)
+  {
+    rclcpp::sleep_for(150ms);
+    double u, v, cov;
+    if (!call_detect_target(min_conf, u, v, cov)) return false;
+    du = u - image_cx_;
+    dv = v - image_cy_;
+    return true;
+  }
+
+  // === Pose-based target centering ==========================================
+  // Detect the target in "cal" mode, read its pixel offset from image center,
+  // convert that to a metric displacement of the CAMERA (image-x -> +cam_y,
+  // image-y -> +cam_z per the mount; optical axis is cam_x, no correction),
+  // rotate that displacement into the base frame via live TF (handles any waist
+  // clocking), and shift C by it. Re-command the straight-down pose at the new
+  // C through the planner -- no joint commands, orientation rebuilt each time.
+  //
+  // Scale (pixels per metre) is unknown a priori, so the first step uses a
+  // height/f guess; from the pixel change it actually produced we measure the
+  // real scale (magnitude only) and use that for the rest.
+  bool center_target_pose(double min_conf)
+  {
+    // Pixel offset now.
+    double u, v, cov;
+    if (!read_cal(min_conf, u, v, cov)) {
+      RCLCPP_WARN(get_logger(), "[Center] no initial cal detection");
+      return false;
+    }
+    double du = u - image_cx_;
+    double dv = v - image_cy_;
+
+    // Scale guess from pinhole: metres-per-pixel = height / focal_px.
+    // height is the current camera height above ground (R at the pole pose).
+    double scale_px_per_m = focal_px_ / std::max(capture_radius_, 1e-3);  // px per metre
+    bool scale_measured = false;
+
+    for (int i = 0; i < center_max_iters_; ++i) {
+      if (std::fabs(du) <= center_deadband_px_ && std::fabs(dv) <= center_deadband_px_) {
+        RCLCPP_INFO(get_logger(), "[Center] centered: du=%.1f dv=%.1f (iter %d)", du, dv, i);
+        return true;
+      }
+
+      // Desired camera-frame displacement to null the offset (metres).
+      // Hard-coded mount mapping: +du -> +cam_y, +dv -> +cam_z. Flip here if
+      // iteration 1 diverges.
+      const double dy_cam = -center_gain_ * (du / scale_px_per_m);
+      const double dz_cam = -center_gain_ * (dv / scale_px_per_m);
+      const double dx_cam = 0.0;   // optical axis; no in-plane correction
+
+      // Rotate the camera-frame displacement into the base frame (rotation
+      // only -- it's a free vector), using this iteration's live orientation.
+      geometry_msgs::msg::TransformStamped base_to_cam;
+      try {
+        base_to_cam = tf_buffer_->lookupTransform(arm_base_frame_, cam_link_, tf2::TimePointZero);
+      } catch (const tf2::TransformException & ex) {
+        RCLCPP_WARN(get_logger(), "[Center] TF %s->%s failed: %s",
+                    arm_base_frame_.c_str(), cam_link_.c_str(), ex.what());
+        return false;
+      }
+      tf2::Quaternion q;
+      tf2::fromMsg(base_to_cam.transform.rotation, q);
+      tf2::Matrix3x3 Rbc(q);
+      tf2::Vector3 disp_cam(dx_cam, dy_cam, dz_cam);
+      tf2::Vector3 disp_base = Rbc * disp_cam;
+
+      // Shift C in the base-frame horizontal plane; hold C.z on the ground.
+      geometry_msgs::msg::Point C = target_center_base_;
+      C.x += disp_base.x();
+      C.y += disp_base.y();
+      // C.z unchanged (ground plane)
+
+      RCLCPP_INFO(get_logger(),
+        "[Center] iter %d: du=%.1f dv=%.1f -> cam(dy=%.3f dz=%.3f) -> base(dx=%.3f dy=%.3f)",
+        i, du, dv, dy_cam, dz_cam, disp_base.x(), disp_base.y());
+
+      // Command the straight-down pose at the corrected C.
+      if (!go_to_pole_pose(C, capture_radius_)) {
+        RCLCPP_WARN(get_logger(), "[Center] pole pose unreachable at corrected C");
+        return false;
+      }
+      target_center_base_ = C;
+
+      // Re-read offset.
+      double u2, v2, cov2;
+      if (!read_cal(min_conf, u2, v2, cov2)) {
+        RCLCPP_WARN(get_logger(), "[Center] lost target after correction");
+        return false;
+      }
+      double du2 = u2 - image_cx_;
+      double dv2 = v2 - image_cy_;
+
+      // Measure the true scale from the pixel change this move produced
+      // (magnitude only -- sign-agnostic). Commanded metric displacement was
+      // |(dy_cam, dz_cam)|; observed pixel change is |(du-du2, dv-dv2)|.
+      if (!scale_measured) {
+        const double d_pix = std::hypot(du - du2, dv - dv2);
+        const double d_m   = std::hypot(dy_cam, dz_cam);
+        if (d_m > 1e-4 && d_pix > center_min_probe_px_) {
+          scale_px_per_m = d_pix / d_m;
+          scale_measured = true;
+          RCLCPP_INFO(get_logger(), "[Center] measured scale = %.1f px/m", scale_px_per_m);
+        }
+      }
+
+      du = du2;
+      dv = dv2;
+    }
+
+    RCLCPP_WARN(get_logger(), "[Center] max iters reached without centering");
+    return false;
+  }
+
+  // One "cal" detection with a settle.
+  bool read_cal(double min_conf, double &u, double &v, double &cov)
+  {
+    rclcpp::sleep_for(150ms);
+    return call_detect_target(min_conf, u, v, cov);
+  }
+
+  // After servoing, recompute C and R from the arm's ACTUAL camera pose (TF),
+  // not the stale detection. C.xy = camera xy in arm frame; C.z = ground plane;
+  // R = camera height above ground.
+  bool update_center_from_tf()
+  {
+    geometry_msgs::msg::TransformStamped foot_to_cam;
+    try {
+      foot_to_cam = tf_buffer_->lookupTransform("base_footprint", cam_link_, tf2::TimePointZero);
+    } catch (const tf2::TransformException & ex) {
+      RCLCPP_WARN(get_logger(), "[Calibrate] TF base_footprint->%s failed: %s",
+                  cam_link_.c_str(), ex.what());
+      return false;
+    }
+    const double cam_height = foot_to_cam.transform.translation.z;
+
+    geometry_msgs::msg::TransformStamped base_to_cam;
+    try {
+      base_to_cam = tf_buffer_->lookupTransform(arm_base_frame_, cam_link_, tf2::TimePointZero);
+    } catch (const tf2::TransformException & ex) {
+      RCLCPP_WARN(get_logger(), "[Calibrate] TF %s->%s failed: %s",
+                  arm_base_frame_.c_str(), cam_link_.c_str(), ex.what());
+      return false;
+    }
+
+    target_center_base_.x = base_to_cam.transform.translation.x;
+    target_center_base_.y = base_to_cam.transform.translation.y;
+    target_center_base_.z = base_to_cam.transform.translation.z - cam_height;
+    capture_radius_ = cam_height;
+
+    RCLCPP_INFO(get_logger(),
+      "[Calibrate] C=(%.3f, %.3f, %.3f) arm frame, R_initial=%.3f",
+      target_center_base_.x, target_center_base_.y, target_center_base_.z, capture_radius_);
+    return true;
+  }
+
+  // === Calibration: Z-recovery (inverse-square one-shot + nudges) ===========
+
+  bool initial_calibration(double min_conf, double target_coverage)
+  {
+    const geometry_msgs::msg::Point C = target_center_base_;
+
+    double cov0 = 0.0;
+    if (!get_coverage_here(min_conf, cov0) || cov0 <= 1e-6) {
+      RCLCPP_WARN(get_logger(), "[Calibrate] no initial coverage; aborting Z-recovery");
+      return false;
+    }
+
+    RCLCPP_INFO(get_logger(), "[Calibrate] initial coverage %.3f (target %.3f)",
+                cov0, target_coverage);
+
+    double R = capture_radius_ * std::sqrt(cov0 / target_coverage);
+    if (!go_to_pole_pose(C, R)) {
+      RCLCPP_WARN(get_logger(), "[Calibrate] one-shot pole pose unreachable at R=%.3f", R);
+      return false;
+    }
+
+    double cov = 0.0;
+    if (!get_coverage_here(min_conf, cov)) {
+      RCLCPP_WARN(get_logger(), "[Calibrate] lost target after one-shot move");
+      return false;
+    }
+    RCLCPP_INFO(get_logger(), "[Calibrate] post one-shot: R=%.3f coverage=%.3f", R, cov);
+
+    const double R_step      = 0.02;   // 2 cm inward per nudge
+    const int    max_nudges  = 5;
+
+    for (int i = 0; i < max_nudges; ++i) {
+      if (cov >= target_coverage) break;
+      R -= R_step;
+      if (R <= 0.0) {
+        RCLCPP_WARN(get_logger(), "[Calibrate] R non-positive during nudge; stopping");
+        break;
+      }
+      if (!go_to_pole_pose(C, R)) {
+        RCLCPP_WARN(get_logger(), "[Calibrate] nudge pose unreachable at R=%.3f", R);
+        break;
+      }
+      if (!get_coverage_here(min_conf, cov)) {
+        RCLCPP_WARN(get_logger(), "[Calibrate] lost target during nudge");
+        return false;
+      }
+      RCLCPP_INFO(get_logger(), "[Calibrate] nudge %d: R=%.3f coverage=%.3f", i + 1, R, cov);
+    }
+
+    capture_radius_ = R;
+    RCLCPP_INFO(get_logger(), "[Calibrate] Z-recovery done: R=%.3f coverage=%.3f", R, cov);
+    return true;
+  }
+
+  bool go_to_pole_pose(const geometry_msgs::msg::Point &C, double R)
+  {
+    geometry_msgs::msg::Pose ee_pose;
+    if (!compute_ee_pose_hemisphere(C, R, 0.0, 0.0, ee_pose)) return false;
+    return move_arm_to_pose(ee_pose);
+  }
+
+  bool get_coverage_here(double min_conf, double &coverage)
+  {
+    rclcpp::sleep_for(150ms);
+    double u, v, cov;
+    if (!call_detect_target(min_conf, u, v, cov)) return false;
+    coverage = cov;
+    return true;
+  }
+
+
+  // === Main collection routine ==============================================
+
+  void main_image_collection(const std::shared_ptr<ScanGoalHandle> goal_handle)
+  {
+    auto goal   = goal_handle->get_goal();
+    auto result = std::make_shared<Reconstruct::Result>();
+    const double min_conf = goal->min_confidence;
+
+    init_move_group_if_needed();
+    init_detect_client_if_needed();
+
+    if (!move_group_) {
+      RCLCPP_ERROR(get_logger(), "MoveGroupInterface not initialized; aborting scan.");
+      goal_handle->abort(result);
+      return;
+    }
+
+    // Rough C/R from TF, then point straight down so the servo works from a
+    // known vertical orientation (clean image axes for the probe).
+    if (!update_center_from_tf()) {
+      RCLCPP_WARN(get_logger(), "[Calibrate] failed to get rough C/R from TF");
+      goal_handle->abort(result);
+      return;
+    }
+    if (!go_to_pole_pose(target_center_base_, capture_radius_)) {
+      RCLCPP_WARN(get_logger(), "[Calibrate] failed to reach initial straight-down pose");
+      goal_handle->abort(result);
+      return;
+    }
+
+    // Center the target under the camera by shifting C and re-planning the
+    // straight-down pose (no joint commands, orientation rebuilt each step).
+    if (!center_target_pose(min_conf)) {
+      RCLCPP_WARN(get_logger(), "[Calibrate] failed to center target");
+      goal_handle->abort(result);
+      return;
+    }
+
+    // Refined C/R from where the arm actually ended up.
+    if (!update_center_from_tf()) {
+      RCLCPP_WARN(get_logger(), "[Calibrate] failed to update C/R after servo");
+      goal_handle->abort(result);
+      return;
+    }
+
+    setup_planning_scene();
+
+    if (!initial_calibration(min_conf, 0.15)) {
+      RCLCPP_WARN(get_logger(), "[Calibrate] Failed to complete calibration");
+      goal_handle->abort(result);
+      return;
+    }
+
+    const geometry_msgs::msg::Point C = target_center_base_;
+    const double R = capture_radius_;
+
+    // phi = 0 (the pole) is captured once at the calibration pose, so it is
+    // excluded here. Rings: 40, 80, 120 deg. Azimuths: 8 at 45 deg spacing.
+    const double phi_step   = 2.0 * M_PI / 9.0;
+    const double phi_stop   = 2.0 * M_PI / 3.0;
+    const double theta_step = M_PI / 4.0;
+    const double retry_step = phi_step / 4.0;
+
+    int captured = 0, dropped = 0, index = 0;
+
+    for (double phi = phi_step; phi <= phi_stop + 1e-6; phi += phi_step) {
+      for (double theta = 0.0; theta < 2.0*M_PI - 1e-6; theta += theta_step) {
+
+        if (goal_handle->is_canceling()) {
+          move_arm_to_stow_pose();
+          goal_handle->canceled(result);
+          return;
+        }
+
+        bool placed = false;
+        for (double phi_try = phi; phi_try > phi - phi_step + 1e-6; phi_try -= retry_step) {
+          geometry_msgs::msg::Pose ee_pose;
+          if (!compute_ee_pose_hemisphere(C, R, phi_try, theta, ee_pose)) continue;
+          if (move_arm_to_pose(ee_pose)) {
+            placed = true;
+            if (std::fabs(phi_try - phi) > 1e-6)
+              RCLCPP_INFO(get_logger(), "ring %.0f/az %.0f reached shallow at %.0f deg",
+                          phi*180/M_PI, theta*180/M_PI, phi_try*180/M_PI);
+            break;
+          }
+        }
+
+        if (!placed) {
+          RCLCPP_WARN(get_logger(), "dropped view phi=%.0f az=%.0f (unreachable)",
+                      phi*180/M_PI, theta*180/M_PI);
+          ++dropped;
+          continue;
+        }
+
+        rclcpp::sleep_for(150ms);
+        if (capture_image()) { ++captured; ++index; }
+      }
+    }
+
+    RCLCPP_INFO(get_logger(), "collection done: %d captured, %d dropped", captured, dropped);
+    result->success = true;
+    goal_handle->succeed(result);
+  }
+
+    // === Members ==============================================================
+  std::string planning_group_, base_joint_name_, wrist_joint_name_;
+  std::string arm_base_frame_, ee_link_, cam_link_;
+
+  // Shoulder/elbow joints for the radial servo pair (VX300s names).
+  const std::string shoulder_joint_name_ = "shoulder";
+  const std::string elbow_joint_name_    = "elbow";
+
+  // Single-joint move polling.
+  const double joint_move_tolerance_ = 0.06;
+  const double joint_move_timeout_   = 5.0;
+  const double joint_poll_rate_hz_   = 30.0;
+
+  // Pose-based centering tunables.
+  const double image_cx_           = 640.0;   // 1280 wide -> center
+  const double image_cy_           = 480.0;   // 960 tall  -> center
+  const double focal_px_           = 1016.6;  // camera focal length in pixels (1280x960)
+  const double center_gain_        = 0.6;     // under-correct so it converges
+  const double center_deadband_px_ = 50.0;    // centered when |du|,|dv| below this
+  const int    center_max_iters_   = 6;       // cap; abort if not centered
+  const double center_min_probe_px_ = 15.0;   // need this much pixel change to trust scale
+
+  // Set by calibration, consumed by main_image_collection
+  geometry_msgs::msg::Point target_center_base_;
+  double capture_radius_{0.0};
+
+  std::mutex joint_state_mutex_;
+  std::map<std::string, double> latest_joint_positions_;
+
+  // ROS handles
+  ScanServer::SharedPtr reconstruction_server;
+  std::shared_ptr<moveit::planning_interface::MoveGroupInterface> move_group_;
+  std::shared_ptr<DetectClient> detect_client_;
+  std::shared_ptr<tf2_ros::Buffer>            tf_buffer_;
+  std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
+
+  rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_pub_;
+  rclcpp::Publisher<interbotix_xs_msgs::msg::JointSingleCommand>::SharedPtr joint_single_pub_;
+  rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_state_sub_;
+};
+
+int main(int argc, char** argv)
+{
+  rclcpp::init(argc, argv);
+  auto node = std::make_shared<ReconstructNode>();
+
+  rclcpp::executors::MultiThreadedExecutor exec;
+  exec.add_node(node);
+  exec.spin();
+
+  rclcpp::shutdown();
+  return 0;
+}

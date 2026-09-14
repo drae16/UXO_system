@@ -1,0 +1,8 @@
+# Goal
+float32 min_confidence
+---
+# Result
+bool success
+---
+# Feedback
+float32 progress
