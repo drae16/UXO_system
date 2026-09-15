@@ -101,7 +101,7 @@ public:
 
     // --- FSM tunables ---
     max_sweeps_             = this->declare_parameter<int>("max_sweeps", 1);
-    desired_final_distance_ = this->declare_parameter<double>("desired_final_distance", 0.40);
+    desired_final_distance_ = this->declare_parameter<double>("desired_final_distance", 0.35);
     nav2_switch_distance_   = this->declare_parameter<double>("nav2_switch_distance", 1.30);
     nav2_approach_margin_   = this->declare_parameter<double>("nav2_approach_margin", 0.3);
 

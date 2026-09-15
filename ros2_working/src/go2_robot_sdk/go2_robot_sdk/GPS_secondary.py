@@ -345,20 +345,20 @@ class GPSNode(Node):
         self.get_logger().info(f'Running task at waypoint ({x:.2f}, {y:.2f})')
 
             
-        #scan = self.navigator.call_scan_area()
+        scan = self.navigator.call_scan_area()
 
-        #if scan.found:
-        self.go_prone()
-        time.sleep(1)
-        #else:
-            #return
+        if scan.found:
+            self.go_prone()
+            time.sleep(1)
+        else:
+            return
 
-        #construct = self.navigator.call_3d_reconstruction()
+        construct = self.navigator.call_3d_reconstruction()
 
-        #if construct:
-        self.stand_up()
-        time.sleep(2)
-        self.enable_move()
+        if construct:
+            self.stand_up()
+            time.sleep(2)
+            self.enable_move()
 
 
         

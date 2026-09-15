@@ -1,6 +1,6 @@
 # Goal
 float32 min_confidence
-string  mode              # "move" | "cal" | "img"
+string  mode              # "move" | "cal" | "img" | "start" | "stop"
 ---
 # Result
 bool    found             # move/cal: target detected | img: captured & published

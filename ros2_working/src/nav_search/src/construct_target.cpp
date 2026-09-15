@@ -639,7 +639,47 @@ private:
     return true;
   }
 
-  // "img" capture: grab a sharp frame, PNG-compress, publish on sfm_img.
+  bool send_sfm_control(const std::string & mode)
+  {
+    init_detect_client_if_needed();
+    if (!detect_client_) return false;
+
+    if (!detect_client_->wait_for_action_server(2s)) {
+      RCLCPP_WARN(get_logger(), "detect_target action server not available");
+      return false;
+    }
+    auto goal_msg = DetectTarget::Goal();
+    goal_msg.mode = mode;
+
+    auto future_goal = detect_client_->async_send_goal(goal_msg, DetectClient::SendGoalOptions());
+    if (future_goal.wait_for(5s) != std::future_status::ready) {
+      RCLCPP_WARN(get_logger(), "Timeout waiting for '%s' goal response", mode.c_str());
+      return false;
+    }
+    auto goal_handle = future_goal.get();
+    if (!goal_handle) {
+      RCLCPP_WARN(get_logger(), "'%s' goal rejected", mode.c_str());
+      return false;
+    }
+
+    auto result_future = detect_client_->async_get_result(goal_handle);
+    if (result_future.wait_for(5s) != std::future_status::ready) {
+      RCLCPP_WARN(get_logger(), "Timeout waiting for '%s' result", mode.c_str());
+      return false;
+    }
+
+    auto result = result_future.get().result;
+    if (!result || !result->found) {
+      RCLCPP_WARN(get_logger(), "'%s' signal not confirmed", mode.c_str());
+      return false;
+    }
+    return true;
+  }
+
+  bool send_start() { return send_sfm_control("start"); }
+  bool send_stop()  { return send_sfm_control("stop"); }
+
+
   bool capture_image()
   {
     init_detect_client_if_needed();
@@ -955,7 +995,7 @@ private:
 
     setup_planning_scene();
 
-    if (!initial_calibration(min_conf, 0.35)) {
+    if (!initial_calibration(min_conf, 0.25)) {
       RCLCPP_WARN(get_logger(), "[Calibrate] Failed to complete calibration");
       goal_handle->abort(result);
       return;
@@ -968,10 +1008,17 @@ private:
     // excluded here. Rings: 40, 80, 120 deg. Azimuths: 8 at 45 deg spacing.
     const double phi_step   =  M_PI / 8.0;
     const double phi_stop   = 3 * M_PI / 8.0;
-    const double theta_step = M_PI / 6.0;
+    const double theta_step = M_PI / 8.0;
     const double retry_step = phi_step / 2.0;
 
     int captured = 0, dropped = 0, index = 0;
+
+    if (!send_start()) {
+      RCLCPP_ERROR(get_logger(), "failed to send SfM start; aborting scan");
+      move_arm_to_stow_pose();
+      goal_handle->abort(result);
+      return;
+    }
 
 
     if (capture_image()) { ++captured; ++index; }
@@ -1009,6 +1056,7 @@ private:
         if (capture_image()) { ++captured; ++index; }
       }
     }
+    send_stop();
     move_arm_to_stow_pose();
     RCLCPP_INFO(get_logger(), "collection done: %d captured, %d dropped", captured, dropped);
     result->success = true;
@@ -1033,7 +1081,7 @@ private:
   const double image_cy_           = 480.0;   // 960 tall  -> center
   const double focal_px_           = 1016.6;  // camera focal length in pixels (1280x960)
   const double center_gain_        = 0.6;     // under-correct so it converges
-  const double center_deadband_px_ = 100.0;    // centered when |du|,|dv| below this
+  const double center_deadband_px_ = 30.0;    // centered when |du|,|dv| below this
   const int    center_max_iters_   = 6;       // cap; abort if not centered
   const double center_min_probe_px_ = 15.0;   // need this much pixel change to trust scale
 

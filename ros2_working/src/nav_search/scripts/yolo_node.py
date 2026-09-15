@@ -40,6 +40,10 @@ def euler_from_quaternion(x, y, z, w):
         return roll_x, pitch_y, yaw_z # in radians
 
 
+SFM_START = "sfm_start"
+SFM_STOP = "sfm_stop"
+
+
 class YoloDetectNode(Node):
     def __init__(self):
         super().__init__("yolo_node")
@@ -59,16 +63,35 @@ class YoloDetectNode(Node):
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
 
+                # ---- capture at full sensor resolution, held for the whole run ----
+        # SfM gets these full-res frames; detection resizes down to IMAGE_SIZE.
+        # Set these to your sensor's true max supported MJPG mode, and keep the
+        # aspect ratio ~4:3 to match the calibration (IMAGE_SIZE). Verify against
+        # the actual resolution printed below — the driver silently substitutes
+        # a mode it supports if the request isn't available.
+        self.CAPTURE_WIDTH = 4656
+        self.CAPTURE_HEIGHT = 3496
+        self.IMAGE_SIZE = (1280,960)
+
         self.camera = cv.VideoCapture(2)
         self.camera.set(cv.CAP_PROP_FOURCC, cv.VideoWriter_fourcc(*"MJPG"))
-        self.camera.set(cv.CAP_PROP_FRAME_WIDTH,  1280)
-        self.camera.set(cv.CAP_PROP_FRAME_HEIGHT, 960)
+        self.camera.set(cv.CAP_PROP_FRAME_WIDTH,  self.CAPTURE_WIDTH)
+        self.camera.set(cv.CAP_PROP_FRAME_HEIGHT, self.CAPTURE_HEIGHT)
         self.camera.set(cv.CAP_PROP_BUFFERSIZE, 1)
 
         actual_w = self.camera.get(cv.CAP_PROP_FRAME_WIDTH)
         actual_h = self.camera.get(cv.CAP_PROP_FRAME_HEIGHT)
-        self.get_logger().info(f"Resolution: {actual_w} x {actual_h}")
+        self.get_logger().info(f"Capture resolution: {actual_w} x {actual_h}")
 
+        # warn if the driver gave a non-4:3 mode -- the detection resize would
+        # then distort and break the calibrated pixel model.
+        if actual_h > 0:
+            ar = actual_w / actual_h
+            if abs(ar - (self.IMAGE_SIZE[0] / self.IMAGE_SIZE[1])) > 0.02:
+                self.get_logger().warn(
+                    f"capture aspect {ar:.3f} != calibration aspect "
+                    f"{self.IMAGE_SIZE[0]/self.IMAGE_SIZE[1]:.3f}; detection resize will distort"
+                )
 
 
         self.img_pub = self.create_publisher(CompressedImage, "sfm_img", 10)
@@ -112,6 +135,9 @@ class YoloDetectNode(Node):
         laplacian = cv.Laplacian(gray, cv.CV_64F)
         variance = laplacian.var()
         return laplacian, variance < threshold, variance
+
+    def _to_detect_res(self, img):
+        return cv.resize(img, self.IMAGE_SIZE, interpolation=cv.INTER_AREA)
 
     def get_sharp_image(self):
         # read frames on demand and return the first that passes the blur test.
@@ -178,6 +204,10 @@ class YoloDetectNode(Node):
             return self._do_cal(goal_handle)
         elif mode == "img":
             return self._do_img(goal_handle)
+        elif mode == "start":
+            return self._do_start(goal_handle)
+        elif mode == "stop":
+            return self._do_stop(goal_handle)
         else:
             self.get_logger().error(f"unknown mode '{mode}'")
             result = self._blank_result()
@@ -215,7 +245,8 @@ class YoloDetectNode(Node):
 
         self.get_logger().info(f"image received")
 
-        results = self.model.predict(img, conf=min_conf, show=False)[0]
+        det_img = self._to_detect_res(img)
+        results = self.model.predict(det_img, conf=min_conf, show=False)[0]        
         boxes = results.boxes
 
         if boxes is None or len(boxes) == 0:
@@ -318,7 +349,8 @@ class YoloDetectNode(Node):
 
         self.get_logger().info(f"image received")
 
-        results = self.model.predict(img, conf=min_conf, show=True)[0]
+        det_img = self._to_detect_res(img)
+        results = self.model.predict(det_img, conf=min_conf, show=True)[0]        
         boxes = results.boxes
 
         if boxes is None or len(boxes) == 0:
@@ -359,6 +391,7 @@ class YoloDetectNode(Node):
         return result
 
     # ---- img: grab a sharp frame, PNG-compress, publish on sfm_img ----
+        # ---- img: grab a sharp frame, PNG-compress, publish on sfm_img ----
     def _do_img(self, goal_handle):
         feedback = DetectTarget.Feedback()
         feedback.progress = 0.0
@@ -368,11 +401,13 @@ class YoloDetectNode(Node):
 
         img = self.get_sharp_image()
         if img is None:
-            self.get_logger().info(f"img: no sharp frame")
+            self.get_logger().info("img: no sharp frame")
             goal_handle.abort()
             return result
-        cv.imwrite(f"{self.save_path}/img{self.img_num}.png",img)
-        self.img_num += 1
+
+        seq = self.img_num  # index for THIS frame; advanced only on success
+        cv.imwrite(f"{self.save_path}/img{seq}.png", img)
+
         ok, buf = cv.imencode(".png", img)
         if not ok:
             self.get_logger().error("img: PNG encode failed")
@@ -381,18 +416,45 @@ class YoloDetectNode(Node):
 
         msg = CompressedImage()
         msg.header.stamp = self.get_clock().now().to_msg()
-        msg.header.frame_id = "vx300s/camera_link"
+        msg.header.frame_id = str(seq)
         msg.format = "png"
         msg.data = buf.tobytes()
         self.img_pub.publish(msg)
 
+        self.img_num += 1
         result.found = True
-        self.get_logger().info(f"img: published {len(msg.data)} byte PNG on sfm_img")
+        self.get_logger().info(f"img: published seq={seq}, {len(msg.data)} bytes on sfm_img")
 
         feedback.progress = 100.0
         goal_handle.publish_feedback(feedback)
         goal_handle.succeed()
         return result
+        # ---- start: reset the per-target counter, signal a new collection ----
+    def _do_start(self, goal_handle):
+        self.img_num = 0
+        self._publish_control(SFM_START)
+        result = self._blank_result()
+        result.found = True
+        self.get_logger().info("start: published sfm_start on sfm_img")
+        goal_handle.succeed()
+        return result
+
+    # ---- stop: signal end of collection so the GCS reconstructs ----
+    def _do_stop(self, goal_handle):
+        self._publish_control(SFM_STOP)
+        result = self._blank_result()
+        result.found = True
+        self.get_logger().info("stop: published sfm_stop on sfm_img")
+        goal_handle.succeed()
+        return result
+
+    # blank control frame; the GCS branches on frame_id before touching data.
+    def _publish_control(self, frame_id):
+        msg = CompressedImage()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = frame_id
+        msg.format = "png"
+        self.img_pub.publish(msg)
 
     def destroy_node(self):
         self.running = False
