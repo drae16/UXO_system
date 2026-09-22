@@ -69,32 +69,58 @@ class YoloDetectNode(Node):
         # aspect ratio ~4:3 to match the calibration (IMAGE_SIZE). Verify against
         # the actual resolution printed below — the driver silently substitutes
         # a mode it supports if the request isn't available.
-        self.CAPTURE_WIDTH = 4656
-        self.CAPTURE_HEIGHT = 3496
-        self.IMAGE_SIZE = (1280,960)
+        self.CAPTURE_WIDTH = 2048
+        self.CAPTURE_HEIGHT = 1536
+        self.IMAGE_SIZE = (2048,1536)
+
+        self.CAPTURE_WIDTH_2 = 640
+        self.CAPTURE_HEIGHT_2 = 512
+        self.IMAGE_SIZE_2 = (640,512)
 
         self.camera = cv.VideoCapture(2)
-        self.camera.set(cv.CAP_PROP_FOURCC, cv.VideoWriter_fourcc(*"MJPG"))
-        self.camera.set(cv.CAP_PROP_FRAME_WIDTH,  self.CAPTURE_WIDTH)
-        self.camera.set(cv.CAP_PROP_FRAME_HEIGHT, self.CAPTURE_HEIGHT)
-        self.camera.set(cv.CAP_PROP_BUFFERSIZE, 1)
+        self.camera2 = cv.VideoCapture(4)
+        self.eo_cam = None
+        self.ir_cam = None
 
-        actual_w = self.camera.get(cv.CAP_PROP_FRAME_WIDTH)
-        actual_h = self.camera.get(cv.CAP_PROP_FRAME_HEIGHT)
+        try:
+            self.camera.set(cv.CAP_PROP_FOURCC, cv.VideoWriter_fourcc(*"MJPG"))
+            self.camera.set(cv.CAP_PROP_FRAME_WIDTH,  self.CAPTURE_WIDTH)
+            self.camera.set(cv.CAP_PROP_FRAME_HEIGHT, self.CAPTURE_HEIGHT)
+            self.camera.set(cv.CAP_PROP_BUFFERSIZE, 1)
+            self.eo_cam = self.camera
+        except:
+            self.camera.set(cv.CAP_PROP_FOURCC, cv.VideoWriter_fourcc(*"MJPG"))
+            self.camera.set(cv.CAP_PROP_FRAME_WIDTH,  self.CAPTURE_WIDTH_2)
+            self.camera.set(cv.CAP_PROP_FRAME_HEIGHT, self.CAPTURE_HEIGHT_2)
+            self.camera.set(cv.CAP_PROP_BUFFERSIZE, 1)
+            self.ir_cam = self.camera
+
+        if self.eo_cam == None:
+            self.camera2.set(cv.CAP_PROP_FOURCC, cv.VideoWriter_fourcc(*"MJPG"))
+            self.camera2.set(cv.CAP_PROP_FRAME_WIDTH,  self.CAPTURE_WIDTH)
+            self.camera2.set(cv.CAP_PROP_FRAME_HEIGHT, self.CAPTURE_HEIGHT)
+            self.camera2.set(cv.CAP_PROP_BUFFERSIZE, 1)
+            self.eo_cam = self.camera2
+        else:
+            self.camera2.set(cv.CAP_PROP_FOURCC, cv.VideoWriter_fourcc(*"MJPG"))
+            self.camera2.set(cv.CAP_PROP_FRAME_WIDTH,  self.CAPTURE_WIDTH_2)
+            self.camera2.set(cv.CAP_PROP_FRAME_HEIGHT, self.CAPTURE_HEIGHT_2)
+            self.camera2.set(cv.CAP_PROP_BUFFERSIZE, 1)
+            self.ir_cam = self.camera2
+
+
+
+        actual_w = self.eo_cam.get(cv.CAP_PROP_FRAME_WIDTH)
+        actual_h = self.eo_cam.get(cv.CAP_PROP_FRAME_HEIGHT)
         self.get_logger().info(f"Capture resolution: {actual_w} x {actual_h}")
 
         # warn if the driver gave a non-4:3 mode -- the detection resize would
         # then distort and break the calibrated pixel model.
-        if actual_h > 0:
-            ar = actual_w / actual_h
-            if abs(ar - (self.IMAGE_SIZE[0] / self.IMAGE_SIZE[1])) > 0.02:
-                self.get_logger().warn(
-                    f"capture aspect {ar:.3f} != calibration aspect "
-                    f"{self.IMAGE_SIZE[0]/self.IMAGE_SIZE[1]:.3f}; detection resize will distort"
-                )
 
 
         self.img_pub = self.create_publisher(CompressedImage, "sfm_img", 10)
+
+        self.ir_pub = self.create_publisher(CompressedImage, "ir_img", 10)
 
         self.server = ActionServer(
             self,
@@ -103,8 +129,7 @@ class YoloDetectNode(Node):
             self.execute_cb,
         )
 
-        self.FOCAL_LENGTH = 1016.6 #508.3
-        self.IMAGE_SIZE = (1280,960) # Image size in pixels
+        self.FOCAL_LENGTH = 1626.56 #1016.6 #508.3
         self.lens = ct.BrownLensDistortion(0.0510, -0.386, 0.0)
         self.POS_X = 0 # x location of camera in meters (relative frame of reference for image info)
         self.POS_Y = 0
@@ -136,9 +161,6 @@ class YoloDetectNode(Node):
         variance = laplacian.var()
         return laplacian, variance < threshold, variance
 
-    def _to_detect_res(self, img):
-        return cv.resize(img, self.IMAGE_SIZE, interpolation=cv.INTER_AREA)
-
     def get_sharp_image(self):
         # read frames on demand and return the first that passes the blur test.
         # on timeout, return the sharpest frame seen so far (None if none arrived).
@@ -146,8 +168,8 @@ class YoloDetectNode(Node):
         best_img = None
         best_var = -1.0
         while time.time() < deadline:
-            ret, frame = self.camera.read()
-            ret, frame = self.camera.read()
+            ret, frame = self.eo_cam.read()
+            ret, frame = self.eo_cam.read()
             if not ret:
                 time.sleep(0.005)
                 continue
@@ -170,6 +192,13 @@ class YoloDetectNode(Node):
     #   (0,0,0) is the point directly underneath the camera (i.e. z=0 is ground)
     # Note: HEADING for camera should be compass heading (world frame), clockwise is positive, 0 degrees faces north
     #   Then, x and y from the output tell you how far east and north the object is from the camera, respectively
+
+    def get_ir_image(self):
+        ret, frame = self.ir_cam.read()
+
+        if ret:
+            return frame
+        
     def spatial_transformation(self, points, knownParamType, knownParamValue):
         # points: either a single [u, v] or a list of [u, v] points
         cam = ct.Camera(ct.RectilinearProjection(focallength_px=self.FOCAL_LENGTH,
@@ -245,8 +274,8 @@ class YoloDetectNode(Node):
 
         self.get_logger().info(f"image received")
 
-        det_img = self._to_detect_res(img)
-        results = self.model.predict(det_img, conf=min_conf, show=False)[0]        
+
+        results = self.model.predict(img, conf=min_conf, show=False)[0]        
         boxes = results.boxes
 
         if boxes is None or len(boxes) == 0:
@@ -349,8 +378,8 @@ class YoloDetectNode(Node):
 
         self.get_logger().info(f"image received")
 
-        det_img = self._to_detect_res(img)
-        results = self.model.predict(det_img, conf=min_conf, show=True)[0]        
+
+        results = self.model.predict(img, conf=min_conf, show=True)[0]        
         boxes = results.boxes
 
         if boxes is None or len(boxes) == 0:
@@ -400,6 +429,10 @@ class YoloDetectNode(Node):
         result = self._blank_result()
 
         img = self.get_sharp_image()
+        ir_img = self. get_ir_image()
+
+
+
         if img is None:
             self.get_logger().info("img: no sharp frame")
             goal_handle.abort()
@@ -407,8 +440,12 @@ class YoloDetectNode(Node):
 
         seq = self.img_num  # index for THIS frame; advanced only on success
         cv.imwrite(f"{self.save_path}/img{seq}.png", img)
+    
 
         ok, buf = cv.imencode(".png", img)
+
+        ir_ok, buf_ir = cv.imencode(".png",ir_img)
+
         if not ok:
             self.get_logger().error("img: PNG encode failed")
             goal_handle.abort()
@@ -420,6 +457,14 @@ class YoloDetectNode(Node):
         msg.format = "png"
         msg.data = buf.tobytes()
         self.img_pub.publish(msg)
+
+
+        msg_ir = CompressedImage()
+        msg_ir.header.stamp = self.get_clock().now().to_msg()
+        msg_ir.header.frame_id = str(seq)
+        msg_ir.format = "png"
+        msg_ir.data = buf_ir.tobytes()
+        self.ir_pub.publish(msg_ir)
 
         self.img_num += 1
         result.found = True
@@ -458,7 +503,8 @@ class YoloDetectNode(Node):
 
     def destroy_node(self):
         self.running = False
-        self.camera.release()
+        self.eo_cam.release()
+        self.ir_cam.release()
         super().destroy_node()
 
 

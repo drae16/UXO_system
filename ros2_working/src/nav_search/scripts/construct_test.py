@@ -52,7 +52,7 @@ def main(args=None):
     rclpy.init(args=args)
 
     # Optional first arg: min_confidence (default 0.7 to match calibration usage).
-    min_conf = 0.7
+    min_conf = 0.4
     if len(sys.argv) > 1:
         try:
             min_conf = float(sys.argv[1])

@@ -248,11 +248,21 @@ private:
     return move_single_joint(joint_name, cur + delta);
   }
 
-  //set planning scene function
 
-  // Add the static world obstacles (ground plane, dog body) and the attached
-  // camera box. Called once after the move group is up, before any planning.
-  // All dimensions are placeholders -- MEASURE and replace.
+  void clear_body(){
+    moveit::planning_interface::PlanningSceneInterface psi;
+    std::vector<std::string> remove_ids = {"dog_body"};
+    psi.removeCollisionObjects(remove_ids); 
+  }
+
+  void clear_planning_scene(){
+    moveit::planning_interface::PlanningSceneInterface psi;
+    std::vector<std::string> remove_ids = {"ground_plane", "gps_body","antenna", "bound1", "bound2"};
+    psi.removeCollisionObjects(remove_ids); 
+  }
+
+
+
   void setup_planning_scene()
   {
     // ---- MEASURE THESE ----
@@ -287,6 +297,13 @@ private:
     const double cam_cx = 0.0;
     const double cam_cy = 0.0;
     const double cam_cz = 0.0;
+
+    const double boundary_x = 0.04;        // m
+    const double boundary_y = 0.70;        // m
+    const double boundry_z = 1.00;        // m
+    const double boundary_cx = 0.55;
+    const double boundary_cy = 0.0;
+    const double boundary_cz = 0.05;
 
 
 
@@ -339,7 +356,7 @@ private:
       dog.operation = moveit_msgs::msg::CollisionObject::ADD;
       world_objects.push_back(dog);
     }
-
+    //GPs module
     {
       moveit_msgs::msg::CollisionObject gps;
       gps.id = "gps_body";
@@ -360,7 +377,7 @@ private:
       gps.operation = moveit_msgs::msg::CollisionObject::ADD;
       world_objects.push_back(gps);
     }
-
+    //GPs antenna
     {
       moveit_msgs::msg::CollisionObject antenna;
       antenna.id = "antenna";
@@ -380,6 +397,48 @@ private:
       antenna.primitive_poses.push_back(pose);
       antenna.operation = moveit_msgs::msg::CollisionObject::ADD;
       world_objects.push_back(antenna);
+    }
+    //boundaried to prevent large arm swings
+    {
+      moveit_msgs::msg::CollisionObject bound1;
+      bound1.id = "bound1";
+      bound1.header.frame_id = arm_base_frame_;
+
+      shape_msgs::msg::SolidPrimitive box;
+      box.type = shape_msgs::msg::SolidPrimitive::BOX;
+      box.dimensions = {boundary_x, boundary_y, boundry_z};
+
+      geometry_msgs::msg::Pose pose;
+      pose.orientation.w = 1.0;
+      pose.position.x = boundary_cx;
+      pose.position.y = boundary_cy;
+      pose.position.z = boundary_cz;
+
+      bound1.primitives.push_back(box);
+      bound1.primitive_poses.push_back(pose);
+      bound1.operation = moveit_msgs::msg::CollisionObject::ADD;
+      world_objects.push_back(bound1);
+    }
+
+    {
+      moveit_msgs::msg::CollisionObject bound2;
+      bound2.id = "bound2";
+      bound2.header.frame_id = arm_base_frame_;
+
+      shape_msgs::msg::SolidPrimitive box;
+      box.type = shape_msgs::msg::SolidPrimitive::BOX;
+      box.dimensions = {boundary_x, boundary_y, boundry_z};
+
+      geometry_msgs::msg::Pose pose;
+      pose.orientation.w = 1.0;
+      pose.position.x = -boundary_cx;
+      pose.position.y = boundary_cy;
+      pose.position.z = boundary_cz;
+
+      bound2.primitives.push_back(box);
+      bound2.primitive_poses.push_back(pose);
+      bound2.operation = moveit_msgs::msg::CollisionObject::ADD;
+      world_objects.push_back(bound2);
     }
 
     if (!world_objects.empty()) {
@@ -995,7 +1054,7 @@ private:
 
     setup_planning_scene();
 
-    if (!initial_calibration(min_conf, 0.25)) {
+    if (!initial_calibration(min_conf, 0.2)) {
       RCLCPP_WARN(get_logger(), "[Calibrate] Failed to complete calibration");
       goal_handle->abort(result);
       return;
@@ -1057,7 +1116,9 @@ private:
       }
     }
     send_stop();
+    clear_body();
     move_arm_to_stow_pose();
+    clear_planning_scene();
     RCLCPP_INFO(get_logger(), "collection done: %d captured, %d dropped", captured, dropped);
     result->success = true;
     goal_handle->succeed(result);
@@ -1077,9 +1138,9 @@ private:
   const double joint_poll_rate_hz_   = 30.0;
 
   // Pose-based centering tunables.
-  const double image_cx_           = 640.0;   // 1280 wide -> center
-  const double image_cy_           = 480.0;   // 960 tall  -> center
-  const double focal_px_           = 1016.6;  // camera focal length in pixels (1280x960)
+  const double image_cx_           = 1042.0;   // 1280 wide -> center
+  const double image_cy_           = 768;   // 960 tall  -> center
+  const double focal_px_           = 1626.56;  // camera focal length in pixels (1280x960)
   const double center_gain_        = 0.6;     // under-correct so it converges
   const double center_deadband_px_ = 30.0;    // centered when |du|,|dv| below this
   const int    center_max_iters_   = 6;       // cap; abort if not centered
