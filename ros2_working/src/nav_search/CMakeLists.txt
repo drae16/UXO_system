@@ -88,14 +88,6 @@ ament_target_dependencies(
   tf2_geometry_msgs
   )
 
-add_executable(odom_tf_republisher_node src/odom_tf_republisher_node.cpp)
-ament_target_dependencies(odom_tf_republisher_node
-  rclcpp
-  nav_msgs
-  geometry_msgs
-  tf2_ros)
-
-  
 install(TARGETS 
   arm_search
   track_target

@@ -60,7 +60,7 @@ class ROS2Publisher(IRobotDataPublisher):
             robot_idx = int(robot_data.robot_id)
             
             # Publish transform
-            #self._publish_transform(robot_data, robot_idx)
+            self._publish_transform(robot_data, robot_idx)
             
             # Publish odometry topic
             self._publish_odometry_topic(robot_data, robot_idx)
@@ -85,8 +85,8 @@ class ROS2Publisher(IRobotDataPublisher):
         orientation = robot_data.odometry_data.orientation
 
 
-        odom_trans.transform.translation.x = float(position['x'])#* 1.2
-        odom_trans.transform.translation.y = float(position['y'])# * 1.2
+        odom_trans.transform.translation.x = float(position['x'])* 1.2
+        odom_trans.transform.translation.y = float(position['y'])* 1.2
         odom_trans.transform.translation.z = float(position['z']) + 0.0
         
         x = float(orientation['x'])

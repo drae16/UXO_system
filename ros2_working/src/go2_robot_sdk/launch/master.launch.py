@@ -55,15 +55,5 @@ def generate_launch_description():
             output='screen',
         ),
 
-        Node(
-            package='nav_search',
-            executable='odom_tf_republisher_node',
-            name='odom_tf_republisher_node',
-            output='screen',
-        ),
-
-
-        
-
         
     ])
