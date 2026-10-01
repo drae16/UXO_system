@@ -41,7 +41,9 @@ setup(
             'odom_covariance_node =go2_robot_sdk.odom_covariance_node:main',
             'fix_origin_publisher = go2_robot_sdk.fix_origin_publisher:main',
             'GPS_secondary = go2_robot_sdk.GPS_secondary:main',
-            'armt_test = go2_robot_sdk.arm_test:main'
+            'armt_test = go2_robot_sdk.arm_test:main',
+            'odom_calibration = go2_robot_sdk.odom_cal:main',
+            'antenna_orientation = go2_robot_sdk.antenna_orientation:main'
 
         ],
     },

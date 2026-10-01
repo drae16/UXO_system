@@ -92,7 +92,6 @@ install(TARGETS
   arm_search
   track_target
   gps_gate_node
-  odom_tf_republisher_node
   construct_target
   DESTINATION lib/${PROJECT_NAME})
  

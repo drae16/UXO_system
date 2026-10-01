@@ -55,5 +55,12 @@ def generate_launch_description():
             output='screen',
         ),
 
+        Node(
+            package='go2_robot_sdk',
+            executable='antenna_orientation',
+            name='antenna_orientation',
+            output='screen',
+        ),
+
         
     ])
