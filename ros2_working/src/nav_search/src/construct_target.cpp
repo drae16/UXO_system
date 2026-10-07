@@ -959,8 +959,11 @@ private:
 
     double cov = 0.0;
     if (!get_coverage_here(min_conf, cov)) {
-      RCLCPP_WARN(get_logger(), "[Calibrate] lost target after one-shot move");
-      return false;
+      RCLCPP_WARN(get_logger(), "[Calibrate] lost target after one-shot move retrying");
+      if (!get_coverage_here(min_conf - 0.1, cov)) {
+        RCLCPP_WARN(get_logger(), "[Calibrate] lost target after retry, aborting");
+          return false;
+      }
     }
     RCLCPP_INFO(get_logger(), "[Calibrate] post one-shot: R=%.3f coverage=%.3f", R, cov);
 
@@ -1033,6 +1036,7 @@ private:
     }
     if (!go_to_pole_pose(target_center_base_, capture_radius_)) {
       RCLCPP_WARN(get_logger(), "[Calibrate] failed to reach initial straight-down pose");
+      move_arm_to_stow_pose();
       goal_handle->abort(result);
       return;
     }
@@ -1040,10 +1044,14 @@ private:
     // Center the target under the camera by shifting C and re-planning the
     // straight-down pose (no joint commands, orientation rebuilt each step).
     if (!center_target_pose(min_conf)) {
-      RCLCPP_WARN(get_logger(), "[Calibrate] failed to center target");
-      goal_handle->abort(result);
-      return;
+      if (!center_target_pose(min_conf)) {
+        RCLCPP_WARN(get_logger(), "[Calibrate] failed to center target");
+        move_arm_to_stow_pose();
+        goal_handle->abort(result);
+        return;
+      }
     }
+
 
     // Refined C/R from where the arm actually ended up.
     if (!update_center_from_tf()) {
@@ -1054,10 +1062,13 @@ private:
 
     setup_planning_scene();
 
-    if (!initial_calibration(min_conf, 0.2)) {
-      RCLCPP_WARN(get_logger(), "[Calibrate] Failed to complete calibration");
-      goal_handle->abort(result);
-      return;
+    if (!initial_calibration(min_conf, 0.15)) {
+      if(!initial_calibration(min_conf,0.20)) {
+        RCLCPP_WARN(get_logger(), "[Calibrate] Failed to complete calibration");
+        move_arm_to_stow_pose();
+        goal_handle->abort(result);
+        return;
+      }
     }
 
     const geometry_msgs::msg::Point C = target_center_base_;
@@ -1138,11 +1149,11 @@ private:
   const double joint_poll_rate_hz_   = 30.0;
 
   // Pose-based centering tunables.
-  const double image_cx_           = 1042.0;   // 1280 wide -> center
-  const double image_cy_           = 768;   // 960 tall  -> center
+  const double image_cx_           = 1024.0;   // 1280 wide -> center
+  const double image_cy_           = 768.0;   // 960 tall  -> center
   const double focal_px_           = 1626.56;  // camera focal length in pixels (1280x960)
   const double center_gain_        = 0.6;     // under-correct so it converges
-  const double center_deadband_px_ = 30.0;    // centered when |du|,|dv| below this
+  const double center_deadband_px_ = 80.0;    // centered when |du|,|dv| below this
   const int    center_max_iters_   = 6;       // cap; abort if not centered
   const double center_min_probe_px_ = 15.0;   // need this much pixel change to trust scale
 

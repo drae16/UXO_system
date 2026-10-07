@@ -120,7 +120,7 @@ class ROS2Publisher(IRobotDataPublisher):
                 rclpy.time.Time()
             )
         except Exception as e:
-            self.get_logger().debug(f"TF lookup failed: {e}")
+            logger.debug(f"TF lookup failed: {e}")
             return
         
         foot_print_trans.transform.translation.x = 0.0

@@ -14,6 +14,7 @@ from nav2_msgs.action import NavigateToPose
 from sensor_msgs.msg import NavSatFix
 from robot_localization.srv import FromLL
 from std_msgs.msg import Empty
+from nav_msgs.msg import Odometry
 from nav_search.action import ScanArea 
 from nav_search.action import Reconstruct
 
@@ -98,7 +99,7 @@ class GPSNavigator:
             return None
 
         goal = ScanArea.Goal()
-        goal.start_angle = -1.4 # -0.5      # or whatever you want
+        goal.start_angle = -1.4 # -0.5    
         goal.end_angle   =  1.4 #0.5
         goal.num_steps   = 4
         goal.min_confidence = 0.6
@@ -219,15 +220,20 @@ class GPSNode(Node):
 
         self.sub_fix = self.create_subscription(NavSatFix, "/fix", self._cb_fix,qos_fix )
         self.sub = self.create_subscription(Vector3, "/gps_targets", self._cb_target, qos)
+        self.colibrated_odom = self.create_subscription(Odometry, "/odom_calibrated", self._cb_odom,qos_fix)
 
         self.publisher_command = self.create_publisher(WebRtcReq, '/webrtc_req', 10)
         self.publisher_completion = self.create_publisher(Empty, 'input_at_waypoint/input',10)
 
 
         self.queue = []  
+        self.current_odom_pos = [0,0]
+        self.current_odom_orientation = None
+        self.initial_position = None
 
         self._lock = threading.Lock()
         self._pos_lock = threading.Lock()
+        self.odom_lock = threading.Lock()
 
         # Navigator wrapper
         self.navigator = GPSNavigator(self)
@@ -247,6 +253,22 @@ class GPSNode(Node):
         with self._pos_lock:
             self.current_lat = msg.latitude
             self.current_lon = msg.longitude
+        if self.initial_position == None:
+            self.initial_position = [msg.longitude,msg.latitude]
+
+    def _cb_odom(self,msg: Odometry):
+        with self.odom_lock:
+            position = msg.pose.pose.position
+            orientation = msg.pose.pose.orientation
+            self.current_odom_pos[0] = position.x
+            self.current_odom_pos[1] = position.y
+            quat = Quaternion()
+            quat.x,quat.y,quat.z,quat.w = orientation.x,orientation.y,orientation.z,orientation.w
+            
+            self.current_odom_orientation = quat
+
+
+
     
     def _worker_loop(self):
         while rclpy.ok():
@@ -287,6 +309,38 @@ class GPSNode(Node):
                 self.run_task_for(pose)
             else:
                 self.get_logger().warn("Navigation failed/canceled")
+
+
+
+    def estimate_target_global(self, x_base: float, y_base: float) -> Optional[tuple]:
+        if self.initial_position is None:
+            self.get_logger().warn("No initial GPS position stored, cannot estimate target")
+            return None
+
+        with self.odom_lock:
+            ox, oy = self.current_odom_pos
+            q = self.current_odom_orientation
+
+        if q is None:
+            self.get_logger().warn("No calibrated odom received, cannot estimate target")
+            return None
+
+        yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y),
+                         1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+
+        east = ox + math.cos(yaw) * x_base - math.sin(yaw) * y_base
+        north = oy + math.sin(yaw) * x_base + math.cos(yaw) * y_base
+
+        lon0, lat0 = self.initial_position
+        R = 6371000.0
+        lat = lat0 + math.degrees(north / R)
+        lon = lon0 + math.degrees(east / (R * math.cos(math.radians(lat0))))
+
+        self.get_logger().info(
+            f"Target estimate: lat={lat:.8f}, lon={lon:.8f} "
+            f"(odom offset E={east:.2f} m, N={north:.2f} m)"
+        )
+        return lat, lon
 
 
     def _convert_gps(self, lat: float, lon: float, yaw: float) -> Optional[PoseStamped]:
@@ -347,18 +401,21 @@ class GPSNode(Node):
             
         scan = self.navigator.call_scan_area()
 
-        if scan.found:
-            self.go_prone()
-            time.sleep(1)
-        else:
+        if scan is None or not scan.found:
             return
+        located_x = scan.x_base
+        located_y = scan.y_base
+        target_ll = self.estimate_target_global(located_x, located_y)
+
+        self.go_prone()
+        time.sleep(1)
 
         construct = self.navigator.call_3d_reconstruction()
 
-        if construct:
-            self.stand_up()
-            time.sleep(2)
-            self.enable_move()
+        
+        self.stand_up()
+        time.sleep(2)
+        self.enable_move()
 
 
         
