@@ -25,6 +25,7 @@ setup(
     entry_points={
         'console_scripts': [
         'fly_drone = parrot_drone.fly_drone:main',
+        'test_system = parrot_drone.test_system:main',
         ],
     },
 )

@@ -298,7 +298,7 @@ class YoloDetectNode(Node):
         self.get_logger().info(f"image received")
 
 
-        results = self.model.predict(img, conf=min_conf, show=False)[0]        
+        results = self.model.predict(img, conf=min_conf, imgsz = (960,1280),show=False)[0]        
         boxes = results.boxes
 
         if boxes is None or len(boxes) == 0:
@@ -402,7 +402,7 @@ class YoloDetectNode(Node):
         self.get_logger().info(f"image received")
 
         ##Change in DOG
-        results = self.model.predict(img, conf=min_conf, show=True)[0]        
+        results = self.model.predict(img, conf=min_conf,imgsz = (960,1280), show=True)[0]        
         boxes = results.boxes
 
         if boxes is None or len(boxes) == 0:

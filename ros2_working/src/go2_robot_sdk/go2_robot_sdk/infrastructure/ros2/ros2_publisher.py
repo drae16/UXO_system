@@ -85,8 +85,8 @@ class ROS2Publisher(IRobotDataPublisher):
         orientation = robot_data.odometry_data.orientation
 
 
-        odom_trans.transform.translation.x = float(position['x'])* 1.2
-        odom_trans.transform.translation.y = float(position['y'])* 1.2
+        odom_trans.transform.translation.x = float(position['x']) * 1.2
+        odom_trans.transform.translation.y = float(position['y']) * 1.2
         odom_trans.transform.translation.z = float(position['z']) + 0.0
         
         x = float(orientation['x'])
@@ -99,12 +99,23 @@ class ROS2Publisher(IRobotDataPublisher):
         norm = math.sqrt(corrected_orientation[0]**2+corrected_orientation[1]**2+corrected_orientation[2]**2+corrected_orientation[3]**2)
 
 
-        odom_trans.transform.rotation.x = x#float(corrected_orientation[0]/norm)
-        odom_trans.transform.rotation.y = y#float(corrected_orientation[1]/norm)
-        odom_trans.transform.rotation.z = z#float(corrected_orientation[2]/norm)
-        odom_trans.transform.rotation.w = w#float(corrected_orientation[3]/norm)
+        odom_trans.transform.rotation.x = x
+        odom_trans.transform.rotation.y = y
+        odom_trans.transform.rotation.z = z
+        odom_trans.transform.rotation.w = w
 
         self.broadcaster.sendTransform(odom_trans)
+
+        raw_x, raw_y = float(position['x']), float(position['y'])
+        k = 1.2
+        corr = TransformStamped()
+        corr.header.stamp = odom_trans.header.stamp
+        corr.header.frame_id = 'odom'
+        corr.child_frame_id = 'lidar_odom'
+        corr.transform.translation.x = (k - 1.0) * raw_x
+        corr.transform.translation.y = (k - 1.0) * raw_y
+        corr.transform.rotation.w = 1.0
+        self.broadcaster.sendTransform(corr)
         
     #Transform from base_link to base_footprint
     def _publish_footprint(self):
@@ -149,7 +160,7 @@ class ROS2Publisher(IRobotDataPublisher):
         position = robot_data.odometry_data.position
         orientation = robot_data.odometry_data.orientation
 
-        odom_msg.pose.pose.position.x = float(position['x']) * 1.2
+        odom_msg.pose.pose.position.x = float(position['x']) *1.2
         odom_msg.pose.pose.position.y = float(position['y']) * 1.2
         odom_msg.pose.pose.position.z = float(position['z']) # 0.07
 
@@ -163,10 +174,10 @@ class ROS2Publisher(IRobotDataPublisher):
         norm = math.sqrt(corrected_orientation[0]**2+corrected_orientation[1]**2+corrected_orientation[2]**2+corrected_orientation[3]**2)
 
 
-        odom_msg.pose.pose.orientation.x = x#float(corrected_orientation[0]/norm)
-        odom_msg.pose.pose.orientation.y = y#float(corrected_orientation[1]/norm)
-        odom_msg.pose.pose.orientation.z = z#float(corrected_orientation[2]/norm)
-        odom_msg.pose.pose.orientation.w = w#float(corrected_orientation[3]/norm)
+        odom_msg.pose.pose.orientation.x = x
+        odom_msg.pose.pose.orientation.y = y
+        odom_msg.pose.pose.orientation.z = z
+        odom_msg.pose.pose.orientation.w = w
 
         self.publishers['odometry'][robot_idx].publish(odom_msg)
 
@@ -266,7 +277,7 @@ class ROS2Publisher(IRobotDataPublisher):
             )
 
             point_cloud = PointCloud2()
-            point_cloud.header = Header(frame_id="odom")
+            point_cloud.header = Header(frame_id="lidar_odom")
             point_cloud.header.stamp = self.node.get_clock().now().to_msg()
             
             fields = [

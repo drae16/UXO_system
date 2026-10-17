@@ -88,10 +88,10 @@ public:
     // --- Camera-circle geometry ---
     camera_height_        = this->declare_parameter<double>("camera_height",       0.4);
     radius_min_           = this->declare_parameter<double>("camera_radius_min",   0.20);
-    radius_max_           = this->declare_parameter<double>("camera_radius_max",   0.65);
+    radius_max_           = this->declare_parameter<double>("camera_radius_max",   0.4);
     radius_scale_factor_  = this->declare_parameter<double>("camera_radius_scale", 0.2);
 
-    side_offset_       = this->declare_parameter<double>("side_offset", 0.3);
+    side_offset_       = this->declare_parameter<double>("side_offset", 0.35);
     yaw_tolerance_rad_ = this->declare_parameter<double>("yaw_tolerance_rad", 0.05);
 
     // --- Joint move polling ---
@@ -100,10 +100,11 @@ public:
     joint_poll_rate_hz_   = this->declare_parameter<double>("joint_poll_rate_hz", 30.0);
 
     // --- FSM tunables ---
-    max_sweeps_             = this->declare_parameter<int>("max_sweeps", 1);
+    max_sweeps_             = this->declare_parameter<int>("max_sweeps", 3);
     desired_final_distance_ = this->declare_parameter<double>("desired_final_distance", 0.35);
-    nav2_switch_distance_   = this->declare_parameter<double>("nav2_switch_distance", 1.30);
+    nav2_switch_distance_   = this->declare_parameter<double>("nav2_switch_distance", 1.00);
     nav2_approach_margin_   = this->declare_parameter<double>("nav2_approach_margin", 0.3);
+    max_trusted_travel_     = this->declare_parameter<double>("max_trusted_travel", 2.75);
 
     local_recovery_waist_range_deg_ = this->declare_parameter<double>("local_recovery_waist_range_deg", 15.0);
     local_recovery_waist_steps_     = this->declare_parameter<int>("local_recovery_waist_steps", 5);
@@ -780,6 +781,12 @@ private:
 
     double vx = dx / dist, vy = dy / dist;
     double goal_dist_from_robot = dist - desired_dist;
+
+    if (goal_dist_from_robot > max_trusted_travel_ ){
+      RCLCPP_WARN(get_logger(), "Target detection is beyond trusted travel distance, traveling max trusted distance and re-assesing");
+      goal_dist_from_robot = max_trusted_travel_;
+    }
+
     RCLCPP_INFO(get_logger(), "[DEBUGG] goal dist from robot = %.2f",
                   goal_dist_from_robot);
     double gx = rx + vx * goal_dist_from_robot;
@@ -980,9 +987,9 @@ private:
     auto feedback = std::make_shared<ScanArea::Feedback>();
 
     const double search_wrist_angle = 1.75;
-    const int    max_levels = 3;
+    const int    max_levels = 4;
     const double delta_rad  = 20.0 * M_PI / 180.0;
-    const double offsets[max_levels] = { +delta_rad, 0.0, -delta_rad };
+    const double offsets[max_levels] = { +delta_rad, 0.0, -delta_rad , -delta_rad*1.3 };
 
     int iteration = 0;
     for (int level = 0; level < max_levels; ++level) {
@@ -1340,7 +1347,7 @@ private:
 
   // FSM tunables
   int    max_sweeps_;
-  double desired_final_distance_, nav2_switch_distance_, nav2_approach_margin_;
+  double desired_final_distance_, nav2_switch_distance_, nav2_approach_margin_, max_trusted_travel_;
   double local_recovery_waist_range_deg_;
   int    local_recovery_waist_steps_;
   double local_recovery_wrist_delta_deg_;

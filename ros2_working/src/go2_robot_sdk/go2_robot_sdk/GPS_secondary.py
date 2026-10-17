@@ -99,9 +99,9 @@ class GPSNavigator:
             return None
 
         goal = ScanArea.Goal()
-        goal.start_angle = -1.4 # -0.5    
-        goal.end_angle   =  1.4 #0.5
-        goal.num_steps   = 4
+        goal.start_angle = -3.14 # -0.5    
+        goal.end_angle   =  3.14 #0.5
+        goal.num_steps   = 10
         goal.min_confidence = 0.6
 
         # Send goal
@@ -229,7 +229,7 @@ class GPSNode(Node):
         self.queue = []  
         self.current_odom_pos = [0,0]
         self.current_odom_orientation = None
-        self.initial_position = None
+        self.last_RTK_pos = None
 
         self._lock = threading.Lock()
         self._pos_lock = threading.Lock()
@@ -250,11 +250,15 @@ class GPSNode(Node):
 
         
     def _cb_fix(self, msg: NavSatFix):
+
+
         with self._pos_lock:
             self.current_lat = msg.latitude
             self.current_lon = msg.longitude
-        if self.initial_position == None:
-            self.initial_position = [msg.longitude,msg.latitude]
+
+        
+        if msg.status == '2' :
+            self.last_RTK_pos = [msg.longitude,msg.latitude]
 
     def _cb_odom(self,msg: Odometry):
         with self.odom_lock:

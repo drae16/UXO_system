@@ -43,7 +43,8 @@ setup(
             'GPS_secondary = go2_robot_sdk.GPS_secondary:main',
             'armt_test = go2_robot_sdk.arm_test:main',
             'odom_calibration = go2_robot_sdk.odom_cal:main',
-            'antenna_orientation = go2_robot_sdk.antenna_orientation:main'
+            'antenna_orientation = go2_robot_sdk.antenna_orientation:main',
+            'grid_scan = go2_robot_sdk.grid_scan:main'
 
         ],
     },

@@ -13,10 +13,10 @@ class ArmSearchTestClient(Node):
     def __init__(self):
         super().__init__('arm_test')
 
-        self.declare_parameter('start_angle', -3.1)
-        self.declare_parameter('end_angle', 3.1)
-        self.declare_parameter('num_steps', 10)
-        self.declare_parameter('min_confidence', 0.7)
+        self.declare_parameter('start_angle', 1.1)
+        self.declare_parameter('end_angle', 2.1)
+        self.declare_parameter('num_steps', 4)
+        self.declare_parameter('min_confidence', 0.6)
 
         self.start_angle = self.get_parameter('start_angle').value
         self.end_angle = self.get_parameter('end_angle').value
@@ -27,7 +27,7 @@ class ArmSearchTestClient(Node):
 
     def send_goal(self):
         self.get_logger().info('Waiting for scan_area action server...')
-        if not self._client.wait_for_server(timeout_sec=5.0):
+        if not self._client.wait_for_server(timeout_sec=10.0):
             self.get_logger().error(
                 'scan_area action server not available after 5s. '
                 'Is arm_search_tracking running?'

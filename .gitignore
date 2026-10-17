@@ -1,0 +1,10 @@
+Parrot_drone/log/
+Parrot_drone/build/
+Parrot_drone/install/
+ros2_test_ws/build/
+ros2_test_ws/install/
+ros2_test_ws/log/
+ros2_working/build/
+ros2_working/install/
+ros2_working/log/
+
