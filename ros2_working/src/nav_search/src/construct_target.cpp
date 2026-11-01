@@ -467,7 +467,7 @@ private:
       cam.object.primitive_poses.push_back(pose);
       cam.object.operation = moveit_msgs::msg::CollisionObject::ADD;
       cam.touch_links = {ee_link_,
-              "vx300s/fingers_link"
+              "vx300s/fingers_link",
               "vx300s/gripper_link",
               "vx300s/left_finger_link",
               "vx300s/right_finger_link"};
@@ -979,6 +979,7 @@ private:
       }
       if (!go_to_pole_pose(C, R)) {
         RCLCPP_WARN(get_logger(), "[Calibrate] nudge pose unreachable at R=%.3f", R);
+        R += R_step;
         break;
       }
       if (!get_coverage_here(min_conf, cov)) {
@@ -1036,6 +1037,8 @@ private:
     }
     if (!go_to_pole_pose(target_center_base_, capture_radius_)) {
       RCLCPP_WARN(get_logger(), "[Calibrate] failed to reach initial straight-down pose");
+      clear_body();
+      clear_planning_scene();
       move_arm_to_stow_pose();
       goal_handle->abort(result);
       return;
@@ -1046,6 +1049,8 @@ private:
     if (!center_target_pose(min_conf)) {
       if (!center_target_pose(min_conf)) {
         RCLCPP_WARN(get_logger(), "[Calibrate] failed to center target");
+        clear_body();
+        clear_planning_scene();
         move_arm_to_stow_pose();
         goal_handle->abort(result);
         return;
@@ -1065,6 +1070,8 @@ private:
     if (!initial_calibration(min_conf, 0.15)) {
       if(!initial_calibration(min_conf,0.20)) {
         RCLCPP_WARN(get_logger(), "[Calibrate] Failed to complete calibration");
+        clear_body();
+        clear_planning_scene();
         move_arm_to_stow_pose();
         goal_handle->abort(result);
         return;
@@ -1081,10 +1088,14 @@ private:
     const double theta_step = M_PI / 8.0;
     const double retry_step = phi_step / 2.0;
 
-    int captured = 0, dropped = 0, index = 0;
+    int captured = 0, dropped = 0, skipped = 0, index = 0;
+
+    const double target_side = (C.y >= 0.0) ? 1.0 : -1.0;
 
     if (!send_start()) {
       RCLCPP_ERROR(get_logger(), "failed to send SfM start; aborting scan");
+      clear_body();
+      clear_planning_scene();
       move_arm_to_stow_pose();
       goal_handle->abort(result);
       return;
@@ -1097,13 +1108,20 @@ private:
       for (double theta = 0.0; theta < 2.0*M_PI - 1e-6; theta += theta_step) {
 
         if (goal_handle->is_canceling()) {
+          clear_body();
+          clear_planning_scene();
           move_arm_to_stow_pose();
           goal_handle->canceled(result);
           return;
         }
 
         bool placed = false;
+        bool on_target_side = false;
         for (double phi_try = phi; phi_try > phi - phi_step + 1e-6; phi_try -= retry_step) {
+          const double cam_y = C.y + R * std::sin(phi_try) * std::sin(theta);
+          if (cam_y * target_side < 0.0) continue;
+          on_target_side = true;
+
           geometry_msgs::msg::Pose ee_pose;
           if (!compute_ee_pose_hemisphere(C, R, phi_try, theta, ee_pose)) continue;
           if (move_arm_to_pose(ee_pose)) {
@@ -1116,6 +1134,12 @@ private:
         }
 
         if (!placed) {
+          if (!on_target_side) {
+            RCLCPP_INFO(get_logger(), "skipped view phi=%.0f az=%.0f (opposite side of arm)",
+                        phi*180/M_PI, theta*180/M_PI);
+            ++skipped;
+            continue;
+          }
           RCLCPP_WARN(get_logger(), "dropped view phi=%.0f az=%.0f (unreachable)",
                       phi*180/M_PI, theta*180/M_PI);
           ++dropped;
@@ -1128,10 +1152,10 @@ private:
     }
     send_stop();
     clear_body();
-    move_arm_to_stow_pose();
     clear_planning_scene();
-    RCLCPP_INFO(get_logger(), "collection done: %d captured, %d dropped", captured, dropped);
-    result->success = true;
+    move_arm_to_stow_pose();
+    RCLCPP_INFO(get_logger(), "collection done: %d captured, %d dropped, %d skipped",
+                captured, dropped, skipped);    result->success = true;
     goal_handle->succeed(result);
   }
 

@@ -28,7 +28,7 @@ class FlyDrone(Node):
         self._init_csv()
 
 
-        self.parrot = DroneAnafi(5,1,1)
+        self.parrot = DroneAnafi(10,1,1)
 
     def _init_csv(self):
         try:
@@ -50,6 +50,15 @@ class FlyDrone(Node):
 
 
     def execute_scan(self):
+
+        try:
+            self.parrot.takeoff()
+
+        except:
+            self.get_logger().error('Failed to takeoff')
+
+            return
+
         try:
                 self.get_logger().info('Taking RGB image')
 
@@ -70,6 +79,9 @@ class FlyDrone(Node):
 
         except: 
             self.get_logger().error('Failed scan step')
+
+
+        #self.land()
 
 
     def land(self):

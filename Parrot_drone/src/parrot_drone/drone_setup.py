@@ -154,11 +154,13 @@ class Planner:
             return False
 
 
-    def generate_flight_grid(self):
-        r = np.ceil(self.distance_x / (0.7 * self.coverage_x))
-        c = np.ceil(self. distance_y / (0.7 * self.coverage_y))
 
-        return int(r), int(c)
+    def generate_flight_grid(self, overlap=0.25):
+        def count(dist, foot):
+            if dist <= foot:
+                return 1
+            return int(np.ceil((dist - foot) / ((1 - overlap) * foot))) + 1
+        return count(self.distance_x, self.coverage_x), count(self.distance_y, self.coverage_y)
 
         
 
@@ -196,7 +198,7 @@ class ImageProcessor:
 
     def conduct_inference(self, image):
         centers= []
-        results = self.model.predict(image,conf=.6)
+        results = self.model.predict(image,conf=.5,imgsz=(960,1280))
         for result in results:
             result.save(filename=f'{detect_directory}/{datetime.now()}.jpg')
             positions = result.boxes.xywh.numpy() 
@@ -272,8 +274,8 @@ class DroneAnafi:
 
         self.logger = getLogger("drone logger")
         self.alt = flight_altitude
-        self.coverage_x = 2* self.alt * math.tan((75*math.pi/180)/2) *.7
-        self.coverage_y = 2* self.alt * math.tan((60*math.pi/180)/2) *.7
+        self.coverage_y = 2* self.alt * math.tan((75*math.pi/180)/2) 
+        self.coverage_x = 2* self.alt * math.tan((60*math.pi/180)/2) 
 
         self.flight_planner = Planner(self.drone,distance_x=dis_x ,distance_y=dis_y, coverage_per_image_x=self.coverage_x, coverage_per_image_y = self.coverage_y)
 

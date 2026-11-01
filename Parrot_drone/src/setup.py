@@ -26,6 +26,7 @@ setup(
         'console_scripts': [
         'fly_drone = parrot_drone.fly_drone:main',
         'test_system = parrot_drone.test_system:main',
+        'GPS_test=parrot_drone.GPS_test:main'
         ],
     },
 )

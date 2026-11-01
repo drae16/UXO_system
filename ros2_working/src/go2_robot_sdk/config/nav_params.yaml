@@ -135,7 +135,7 @@ controller_server:
       trans_stopped_velocity: 0.1
       short_circuit_trajectory_evaluation: True
       stateful: True
-      critics: ["RotateToGoal", "Oscillation", "BaseObstacle", "GoalAlign", "PathAlign", "PathDist", "GoalDist"]
+      critics: ["Oscillation", "BaseObstacle", "GoalAlign", "PathAlign", "PathDist", "GoalDist"]
       BaseObstacle.scale: 0.02
       PathAlign.scale: 32.0
       PathAlign.forward_point_distance: 0.1
@@ -143,9 +143,6 @@ controller_server:
       GoalAlign.forward_point_distance: 0.1
       PathDist.scale: 32.0
       GoalDist.scale: 24.0
-      RotateToGoal.scale: 32.0
-      RotateToGoal.slowing_factor: 5.0
-      RotateToGoal.lookahead_time: -1.0
 
 local_costmap:
   local_costmap:
@@ -165,7 +162,7 @@ local_costmap:
       footprint_padding: .05
       lethal_cost_threshold: 80
       always_send_full_costmap: true
-      plugins: ["stvl_layer", "inflation_layer", "denoise_layer"]
+      plugins: [ "stvl_layer","denoise_layer","inflation_layer"] 
 
       stvl_layer:
         plugin: "spatio_temporal_voxel_layer/SpatioTemporalVoxelLayer"
@@ -215,8 +212,8 @@ local_costmap:
       denoise_layer:
         plugin: "nav2_costmap_2d::DenoiseLayer"
         enabled: true
-        minimal_group_size: 25        
-        group_connectivity_type: 4   
+        minimal_group_size: 7        
+        group_connectivity_type: 8   
 
 global_costmap:
   global_costmap:

@@ -86,9 +86,9 @@ public:
     cam_link_         = this->declare_parameter<std::string>("cam_link", "vx300s/camera_link");
 
     // --- Camera-circle geometry ---
-    camera_height_        = this->declare_parameter<double>("camera_height",       0.4);
+    camera_height_        = this->declare_parameter<double>("camera_height",       0.5);
     radius_min_           = this->declare_parameter<double>("camera_radius_min",   0.20);
-    radius_max_           = this->declare_parameter<double>("camera_radius_max",   0.4);
+    radius_max_           = this->declare_parameter<double>("camera_radius_max",   0.3);
     radius_scale_factor_  = this->declare_parameter<double>("camera_radius_scale", 0.2);
 
     side_offset_       = this->declare_parameter<double>("side_offset", 0.35);
@@ -104,7 +104,7 @@ public:
     desired_final_distance_ = this->declare_parameter<double>("desired_final_distance", 0.35);
     nav2_switch_distance_   = this->declare_parameter<double>("nav2_switch_distance", 1.00);
     nav2_approach_margin_   = this->declare_parameter<double>("nav2_approach_margin", 0.3);
-    max_trusted_travel_     = this->declare_parameter<double>("max_trusted_travel", 2.75);
+    max_trusted_travel_     = this->declare_parameter<double>("max_trusted_travel", 2.2);
 
     local_recovery_waist_range_deg_ = this->declare_parameter<double>("local_recovery_waist_range_deg", 15.0);
     local_recovery_waist_steps_     = this->declare_parameter<int>("local_recovery_waist_steps", 5);
@@ -680,7 +680,7 @@ private:
     goal_msg.min_confidence = static_cast<float>(min_conf);
 
     auto future_goal = detect_client_->async_send_goal(goal_msg, DetectClient::SendGoalOptions());
-    if (future_goal.wait_for(5s) != std::future_status::ready) {
+    if (future_goal.wait_for(15s) != std::future_status::ready) {
       RCLCPP_WARN(get_logger(), "Timeout waiting for detect_target goal response");
       return false;
     }
@@ -691,7 +691,7 @@ private:
     }
 
     auto result_future = detect_client_->async_get_result(goal_handle);
-    if (result_future.wait_for(10s) != std::future_status::ready) {
+    if (result_future.wait_for(15s) != std::future_status::ready) {
       RCLCPP_WARN(get_logger(), "Timeout waiting for detect_target result");
       return false;
     }

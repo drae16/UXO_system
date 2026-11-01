@@ -10,6 +10,8 @@ find_package(moveit_ros_planning_interface REQUIRED)
 find_package(moveit_msgs REQUIRED)
 find_package(shape_msgs REQUIRED)
 find_package(nav2_msgs REQUIRED)
+find_package(nav_msgs REQUIRED)
+find_package(std_srvs REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
@@ -28,9 +30,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   DEPENDENCIES geometry_msgs
 )
 
-ament_export_dependencies(rosidl_default_runtime geometry_msgs)
-
-# ---- C++ node ----
+# ---- C++ nodes ----
 add_executable(arm_search src/arm_search.cpp)
 ament_target_dependencies(
   arm_search
@@ -38,7 +38,7 @@ ament_target_dependencies(
   rclcpp_action
   moveit_ros_planning_interface
   nav2_msgs
-  nav_msgs 
+  nav_msgs
   tf2_ros
   tf2_geometry_msgs
   interbotix_xs_msgs
@@ -79,35 +79,36 @@ rosidl_target_interfaces(track_target
 
 add_executable(gps_gate_node src/gps_gate_node.cpp)
 ament_target_dependencies(
-  gps_gate_node 
-  rclcpp 
-  nav_msgs 
+  gps_gate_node
+  rclcpp
+  nav_msgs
   std_srvs
   tf2
   tf2_ros
   tf2_geometry_msgs
-  )
+)
 
-install(TARGETS 
+install(TARGETS
   arm_search
   track_target
   gps_gate_node
   construct_target
   DESTINATION lib/${PROJECT_NAME})
- 
- install(
+
+install(
   DIRECTORY models/
   DESTINATION share/${PROJECT_NAME}/models
 )
 
-# ---- Python node (just a script) ----
+# ---- Python nodes (scripts) ----
 install(PROGRAMS
   scripts/yolo_node.py
   scripts/arm_test.py
   scripts/construct_test.py
+  scripts/run_task_tester.py
   DESTINATION lib/${PROJECT_NAME})
 
 # Export action interfaces
-ament_export_dependencies(rosidl_default_runtime)
+ament_export_dependencies(rosidl_default_runtime geometry_msgs)
 
 ament_package()

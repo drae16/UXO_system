@@ -28,7 +28,7 @@ class FlyDrone(Node):
         self._init_csv()
 
 
-        self.parrot = DroneAnafi(5,1,1)
+        self.parrot = DroneAnafi(8,3,3)
         self.planner = self.parrot.flight_planner
 
     def _init_csv(self):
@@ -59,39 +59,47 @@ class FlyDrone(Node):
         # drone will rotate, and shift to the next column. 
 
         self.parrot.takeoff()
+        self.geolocate_in_air()
 
-        for column in range(col):
+        for column in range(col): #Change
+            self.geolocate_in_air()
             for row in range(rows):
-                try:
-                    if self.parrot.move_straight(self.parrot.coverage_x):
-                        self.get_logger().info('Taking RGB image')
+                if self.parrot.move_straight(0.75*self.parrot.coverage_x):
+                    self.geolocate_in_air()
 
-                        result, pos = self.parrot.take_photo_rgb()
-                        lat,lon,_ = self.parrot.get_gps()
-
-                        self.get_logger().info(f"Drone photo at {lat}, {lon} ")
-
-                        if result:
-                            for position in pos:
-                                self.get_logger().info(f"Target found at {position[0]}, {position[1]} ")
-                                self._log_detection(lat, lon, position[0], position[1])
-                                msg = Vector3()
-                                msg.x = position[0]
-                                msg.y = position[1]
-                                msg.z = 0.0
-                                self.publisher.publish(msg)
-
-                except: 
-                    self.get_logger().error('Failed scan step')
-
+                
 
             
             try:
                     mod = dir_counter ** column 
                     self.parrot.rotate()
-                    self.parrot.move_right(mod*self.parrot.coverage_x)
+                    self.parrot.move_right(0.75*mod*self.parrot.coverage_y)
             except Exception as e: 
                 self.get_logger.error(f'Failed scan step: {e}')
+
+    def geolocate_in_air(self):
+        try:
+            
+            self.get_logger().info('Taking RGB image')
+
+            result, pos = self.parrot.take_photo_rgb()
+            lat,lon,_ = self.parrot.get_gps()
+
+            self.get_logger().info(f"Drone photo at {lat}, {lon} ")
+
+            if result:
+                for position in pos:
+                    self.get_logger().info(f"Target found at {position[0]}, {position[1]} ")
+                    self._log_detection(lat, lon, position[0], position[1])
+                    msg = Vector3()
+                    msg.x = position[0]
+                    msg.y = position[1]
+                    msg.z = 0.0
+                    self.publisher.publish(msg)
+        except: 
+             self.get_logger().error('Failed scan step')
+
+
 
     def land(self):
         self.parrot.land()

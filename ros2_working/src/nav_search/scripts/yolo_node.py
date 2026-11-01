@@ -9,6 +9,7 @@ import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionServer
 from sensor_msgs.msg import Image, CompressedImage
+from geometry_msgs.msg import Vector3Stamped
 from tf2_ros import Buffer, TransformListener
 from nav_search.action import DetectTarget
 from ultralytics import YOLO
@@ -89,6 +90,8 @@ class YoloDetectNode(Node):
 
         self.img_pub = self.create_publisher(CompressedImage, "sfm_img", 10)
 
+        self.location_pub = self.create_publisher(Vector3Stamped,"target_location", 10)
+
         self.ir_pub = self.create_publisher(CompressedImage, "ir_img", 10)
 
         self.server = ActionServer(
@@ -111,7 +114,7 @@ class YoloDetectNode(Node):
         self.SHARP_TIMEOUT = 5.0 # seconds to wait for a sharp frame before giving up
 
         #remove from dog      
-        os.mkdir(self.save_path)
+        #os.mkdir(self.save_path)
 
     def set_cameras(self):
         self.eo_cam = cv.VideoCapture("/dev/arm_cam",cv.CAP_V4L2)
@@ -356,6 +359,19 @@ class YoloDetectNode(Node):
         result.found = True
         result.x_base = float(y_base)
         result.y_base = float(-1 * x_base)
+
+        msg = Vector3Stamped()
+        msg.header._stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = "base_footprint"
+        msg.vector.x = float(y_base)
+        msg.vector.y = float(-1 * x_base)
+        msg.vector.z = v
+
+        self.location_pub.publish(msg)
+
+
+
+
         dist = math.sqrt(result.x_base**2 + result.y_base**2)
         self.get_logger().info(f"Coordinates found x= {result.x_base},y = {result.y_base},z= {z_base}")
         self.get_logger().info(f"Coordinates found distance= {dist}")
@@ -401,8 +417,8 @@ class YoloDetectNode(Node):
 
         self.get_logger().info(f"image received")
 
-        ##Change in DOG
-        results = self.model.predict(img, conf=min_conf,imgsz = (960,1280), show=True)[0]        
+        ##Change in dog
+        results = self.model.predict(img, conf=min_conf,imgsz = (960,1280), show=False)[0]        
         boxes = results.boxes
 
         if boxes is None or len(boxes) == 0:
@@ -463,8 +479,8 @@ class YoloDetectNode(Node):
 
         seq = self.img_num  # index for THIS frame; advanced only on success
 
-        #Change in DOG
-        cv.imwrite(f"{self.save_path}/img{seq}.png", img)
+        #Change in dog
+        #cv.imwrite(f"{self.save_path}/img{seq}.png", img)
     
 
         ok, buf = cv.imencode(".png", img)

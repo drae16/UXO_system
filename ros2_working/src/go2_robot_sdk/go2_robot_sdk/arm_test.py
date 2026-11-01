@@ -18,8 +18,8 @@ class ArmTest(Node):
         
         goal = ScanArea.Goal()
         goal.start_angle = -3.14
-        goal.end_angle = 3.14
-        goal.num_steps = 10
+        goal.end_angle = -2.14
+        goal.num_steps = 4
         goal.min_confidence = 0.6
 
         send_future = self.test_client.send_goal_async(goal)

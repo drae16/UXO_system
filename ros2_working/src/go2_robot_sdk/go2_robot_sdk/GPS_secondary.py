@@ -1,4 +1,3 @@
-
 #!/usr/bin/env python3
 import math, time, threading
 from typing import Optional
@@ -13,7 +12,7 @@ from geometry_msgs.msg import PoseStamped, Quaternion, Vector3
 from nav2_msgs.action import NavigateToPose
 from sensor_msgs.msg import NavSatFix
 from robot_localization.srv import FromLL
-from std_msgs.msg import Empty
+from std_msgs.msg import Empty,Bool
 from nav_msgs.msg import Odometry
 from nav_search.action import ScanArea 
 from nav_search.action import Reconstruct
@@ -220,6 +219,8 @@ class GPSNode(Node):
 
         self.sub_fix = self.create_subscription(NavSatFix, "/fix", self._cb_fix,qos_fix )
         self.sub = self.create_subscription(Vector3, "/gps_targets", self._cb_target, qos)
+        self.sub_RTK = self.create_subscription(Bool, "/set_rtk", self._cb_initial_pos, qos_fix)
+
         self.colibrated_odom = self.create_subscription(Odometry, "/odom_calibrated", self._cb_odom,qos_fix)
 
         self.publisher_command = self.create_publisher(WebRtcReq, '/webrtc_req', 10)
@@ -229,7 +230,7 @@ class GPSNode(Node):
         self.queue = []  
         self.current_odom_pos = [0,0]
         self.current_odom_orientation = None
-        self.last_RTK_pos = None
+        self.initial_position = None
 
         self._lock = threading.Lock()
         self._pos_lock = threading.Lock()
@@ -250,15 +251,14 @@ class GPSNode(Node):
 
         
     def _cb_fix(self, msg: NavSatFix):
-
-
         with self._pos_lock:
             self.current_lat = msg.latitude
             self.current_lon = msg.longitude
 
-        
-        if msg.status == '2' :
-            self.last_RTK_pos = [msg.longitude,msg.latitude]
+    def _cb_initial_pos(self,msg: Bool):
+        if msg.data:
+            with self._pos_lock:
+                self.initial_position = [self.current_lon,self.current_lat]
 
     def _cb_odom(self,msg: Odometry):
         with self.odom_lock:
@@ -273,14 +273,17 @@ class GPSNode(Node):
 
 
 
-    
+
     def _worker_loop(self):
+        error_msg = 0
         while rclpy.ok():
             with self._pos_lock:
                 cur_lat, cur_lon = self.current_lat, self.current_lon
 
             if cur_lat is None:
-                self.get_logger().warn("No GPS fix yet, waiting...")
+                if error_msg%5 == 0:
+                    self.get_logger().warn("No GPS fix yet, waiting...")
+                error_msg += 1    
                 time.sleep(0.5)
                 continue
 
@@ -412,7 +415,7 @@ class GPSNode(Node):
         target_ll = self.estimate_target_global(located_x, located_y)
 
         self.go_prone()
-        time.sleep(1)
+        time.sleep(2.5)
 
         construct = self.navigator.call_3d_reconstruction()
 
