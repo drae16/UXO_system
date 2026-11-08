@@ -99,9 +99,11 @@ private:
   {
     if (move_group_) return;
 
-    RCLCPP_INFO(get_logger(), "Fetching robot_description and SRDF from /move_group...");
+    RCLCPP_INFO(get_logger(), "Fetching robot_description, SRDF, and kinematics from /move_group...");
 
-    auto param_node = rclcpp::Node::make_shared("arm_search_param_client");
+    auto param_node = rclcpp::Node::make_shared(
+      "reconstruct_param_client",
+      rclcpp::NodeOptions().use_global_arguments(false));
     const std::string move_group_node_name = "/move_group";
 
     auto param_client = std::make_shared<rclcpp::AsyncParametersClient>(
@@ -117,11 +119,26 @@ private:
                   move_group_node_name.c_str());
     }
 
-    auto future = param_client->get_parameters(
-      {"robot_description", "robot_description_semantic"});
-
     rclcpp::executors::SingleThreadedExecutor exec;
     exec.add_node(param_node);
+
+    auto list_future = param_client->list_parameters({planning_group_}, 10);
+    if (exec.spin_until_future_complete(list_future, 5s) != rclcpp::FutureReturnCode::SUCCESS) {
+      RCLCPP_ERROR(get_logger(), "Timed out listing kinematics parameters from %s",
+                   move_group_node_name.c_str());
+      exec.remove_node(param_node);
+      return;
+    }
+
+    std::vector<std::string> names;
+    for (const auto &n : list_future.get().names) {
+      if (n.find("kinematics_solver") != std::string::npos) names.push_back(n);
+    }
+    RCLCPP_INFO(get_logger(), "Fetched %zu kinematics parameters", names.size());
+    names.push_back("robot_description");
+    names.push_back("robot_description_semantic");
+
+    auto future = param_client->get_parameters(names);
     auto ret = exec.spin_until_future_complete(future, 5s);
     exec.remove_node(param_node);
 
@@ -131,14 +148,24 @@ private:
       return;
     }
 
-    auto params = future.get();
-    if (!this->has_parameter("robot_description")) {
-      this->declare_parameter<std::string>("robot_description", "");
+    const std::string group_prefix = planning_group_ + ".";
+    std::vector<rclcpp::Parameter> valid;
+    for (const auto &p : future.get()) {
+      if (p.get_type() == rclcpp::ParameterType::PARAMETER_NOT_SET) {
+        RCLCPP_INFO(get_logger(), "Skipping unset parameter '%s'", p.get_name().c_str());
+        continue;
+      }
+      std::string name = p.get_name();
+      if (name.rfind(group_prefix, 0) == 0) {
+        name = "robot_description_kinematics." + name;
+      }
+      rclcpp::Parameter q(name, p.get_parameter_value());
+      if (!this->has_parameter(name)) {
+        this->declare_parameter(name, q.get_parameter_value());
+      }
+      valid.push_back(q);
     }
-    if (!this->has_parameter("robot_description_semantic")) {
-      this->declare_parameter<std::string>("robot_description_semantic", "");
-    }
-    this->set_parameters(params);
+    this->set_parameters(valid);
 
     RCLCPP_INFO(get_logger(), "Initializing MoveGroupInterface...");
     move_group_ = std::make_shared<moveit::planning_interface::MoveGroupInterface>(
@@ -174,12 +201,10 @@ private:
     return rclcpp_action::CancelResponse::ACCEPT;
   }
 
-
   void handle_scan_accepted(const std::shared_ptr<ScanGoalHandle> goal_handle)
   {
     std::thread(&ReconstructNode::main_image_collection, this, goal_handle).detach();
   }
-
 
   // === Joint state cache ====================================================
 
@@ -291,9 +316,9 @@ private:
     const double antenna_cy = 0.0;
     const double antenna_cz = 0.065;
 
-    const double cam_len_x = 0.06;        // m
-    const double cam_wid_y = 0.06;        // m
-    const double cam_hgt_z = 0.08;        // m
+    const double cam_len_x = 0.08;        // m
+    const double cam_wid_y = 0.07;        // m
+    const double cam_hgt_z = 0.09;        // m
     const double cam_cx = 0.0;
     const double cam_cy = 0.0;
     const double cam_cz = 0.0;
@@ -467,8 +492,10 @@ private:
       cam.object.primitive_poses.push_back(pose);
       cam.object.operation = moveit_msgs::msg::CollisionObject::ADD;
       cam.touch_links = {ee_link_,
+              "vx300s/gripper_prop_link",
               "vx300s/fingers_link",
               "vx300s/gripper_link",
+              "vx300s/gripper_bar_link",
               "vx300s/left_finger_link",
               "vx300s/right_finger_link"};
 
@@ -485,11 +512,17 @@ private:
     if (!move_group_) return false;
 
     move_group_->setStartStateToCurrentState();
-    move_group_->setPoseTarget(pose, ee_link_);
+    // Seed IK from the current configuration, then solve locally. No IK ->
+    // reject immediately instead of burning the 3 s planning timeout.
+    move_group_->setJointValueTarget(move_group_->getCurrentJointValues());
+    if (!move_group_->setJointValueTarget(pose, ee_link_)) {
+      RCLCPP_INFO(get_logger(), "No IK for camera pose; skipping plan");
+      return false;
+    }
 
     moveit::planning_interface::MoveGroupInterface::Plan plan;
     if (move_group_->plan(plan) != moveit::core::MoveItErrorCode::SUCCESS) {
-      RCLCPP_WARN(get_logger(), "No plan found for camera pose");
+      RCLCPP_WARN(get_logger(), "IK ok but no plan for camera pose");
       return false;
     }
     if (move_group_->execute(plan) != moveit::core::MoveItErrorCode::SUCCESS) {
@@ -528,6 +561,50 @@ private:
   bool move_arm_to_stow_pose()   { return move_arm_to_named("Sleep");  }
 
 
+  // Ground-aligned axes (base_footprint) expressed in the arm base frame.
+  bool ground_basis_in_arm(tf2::Vector3 &gx, tf2::Vector3 &gy, tf2::Vector3 &up)
+  {
+    geometry_msgs::msg::TransformStamped t;
+    try {
+      t = tf_buffer_->lookupTransform(arm_base_frame_, "base_footprint", tf2::TimePointZero);
+    } catch (const tf2::TransformException &ex) {
+      RCLCPP_WARN(get_logger(), "[Ground] TF %s->base_footprint failed: %s",
+                  arm_base_frame_.c_str(), ex.what());
+      return false;
+    }
+    tf2::Quaternion q;
+    tf2::fromMsg(t.transform.rotation, q);
+    const tf2::Matrix3x3 Rg(q);
+    gx = Rg.getColumn(0);
+    gy = Rg.getColumn(1);
+    up = Rg.getColumn(2);
+    return true;
+  }
+
+
+  // Log the camera optical axis tilt from vertical, in the arm base frame and
+  // in base_footprint.
+  void log_camera_tilt()
+  {
+    for (const std::string &frame : {arm_base_frame_, std::string("base_footprint")}) {
+      geometry_msgs::msg::TransformStamped t;
+      try {
+        t = tf_buffer_->lookupTransform(frame, cam_link_, tf2::TimePointZero);
+      } catch (const tf2::TransformException &ex) {
+        RCLCPP_WARN(get_logger(), "[Tilt] TF %s->%s failed: %s",
+                    frame.c_str(), cam_link_.c_str(), ex.what());
+        continue;
+      }
+      tf2::Quaternion q;
+      tf2::fromMsg(t.transform.rotation, q);
+      const tf2::Vector3 axis = tf2::Matrix3x3(q) * tf2::Vector3(1.0, 0.0, 0.0);
+      const double tilt = std::acos(std::clamp(-axis.z(), -1.0, 1.0)) * 180.0 / M_PI;
+      RCLCPP_INFO(get_logger(), "[Tilt] optical axis in %s: (%.3f, %.3f, %.3f), %.2f deg from vertical",
+                  frame.c_str(), axis.x(), axis.y(), axis.z(), tilt);
+    }
+  }
+
+
   bool compute_ee_pose_hemisphere(const geometry_msgs::msg::Point &C,
                                 double R, double phi, double theta,
                                 geometry_msgs::msg::Pose &ee_pose_out)
@@ -535,15 +612,18 @@ private:
     const double sp = std::sin(phi), cp = std::cos(phi);
     const double ct = std::cos(theta), st = std::sin(theta);
 
-    tf2::Vector3 cam_pos(C.x + R*sp*ct, C.y + R*sp*st, C.z + R*cp);
+    tf2::Vector3 gx, gy, up;
+    if (!ground_basis_in_arm(gx, gy, up)) return false;
 
-    tf2::Vector3 x_axis(C.x - cam_pos.x(), C.y - cam_pos.y(), C.z - cam_pos.z());
+    const tf2::Vector3 Cv(C.x, C.y, C.z);
+    const tf2::Vector3 cam_pos = Cv + R * (sp*ct*gx + sp*st*gy + cp*up);
+
+    tf2::Vector3 x_axis = Cv - cam_pos;
     if (x_axis.length2() < 1e-9) return false;
     x_axis.normalize();
 
-    tf2::Vector3 world_up(0.0, 0.0, 1.0);
-    tf2::Vector3 y_axis = x_axis.cross(-world_up);
-    if (y_axis.length2() < 1e-6) y_axis = tf2::Vector3(0.0, 1.0, 0.0);  // pole fallback
+    tf2::Vector3 y_axis = x_axis.cross(-up);
+    if (y_axis.length2() < 1e-6) y_axis = gy;  // pole fallback
     y_axis.normalize();
 
     tf2::Vector3 z_axis = x_axis.cross(y_axis);
@@ -796,8 +876,9 @@ private:
   // convert that to a metric displacement of the CAMERA (image-x -> +cam_y,
   // image-y -> +cam_z per the mount; optical axis is cam_x, no correction),
   // rotate that displacement into the base frame via live TF (handles any waist
-  // clocking), and shift C by it. Re-command the straight-down pose at the new
-  // C through the planner -- no joint commands, orientation rebuilt each time.
+  // clocking), and shift C by it within the ground plane. Re-command the
+  // straight-down pose at the new C through the planner -- no joint commands,
+  // orientation rebuilt each time.
   //
   // Scale (pixels per metre) is unknown a priori, so the first step uses a
   // height/f guess; from the pixel change it actually produced we measure the
@@ -847,20 +928,30 @@ private:
       tf2::Vector3 disp_cam(dx_cam, dy_cam, dz_cam);
       tf2::Vector3 disp_base = Rbc * disp_cam;
 
-      // Shift C in the base-frame horizontal plane; hold C.z on the ground.
+      // Shift C within the ground plane (remove any component along ground normal).
+      tf2::Vector3 gx, gy, up;
+      if (!ground_basis_in_arm(gx, gy, up)) return false;
+      disp_base -= up * disp_base.dot(up);
+
       geometry_msgs::msg::Point C = target_center_base_;
       C.x += disp_base.x();
       C.y += disp_base.y();
-      // C.z unchanged (ground plane)
+      C.z += disp_base.z();
 
       RCLCPP_INFO(get_logger(),
-        "[Center] iter %d: du=%.1f dv=%.1f -> cam(dy=%.3f dz=%.3f) -> base(dx=%.3f dy=%.3f)",
-        i, du, dv, dy_cam, dz_cam, disp_base.x(), disp_base.y());
+        "[Center] iter %d: du=%.1f dv=%.1f -> cam(dy=%.3f dz=%.3f) -> base(dx=%.3f dy=%.3f dz=%.3f)",
+        i, du, dv, dy_cam, dz_cam, disp_base.x(), disp_base.y(), disp_base.z());
 
-      // Command the straight-down pose at the corrected C.
-      if (!go_to_pole_pose(C, capture_radius_)) {
+      // Command the straight-down pose at the corrected C, lowering if needed.
+      double R_try = capture_radius_;
+      if (!go_to_pole_pose_lowering(C, R_try)) {
         RCLCPP_WARN(get_logger(), "[Center] pole pose unreachable at corrected C");
         return false;
+      }
+      const bool height_changed = (R_try < capture_radius_ - 1e-6);
+      if (height_changed) {
+        scale_px_per_m *= capture_radius_ / R_try;   // closer camera -> more px per metre
+        capture_radius_ = R_try;
       }
       target_center_base_ = C;
 
@@ -876,7 +967,8 @@ private:
       // Measure the true scale from the pixel change this move produced
       // (magnitude only -- sign-agnostic). Commanded metric displacement was
       // |(dy_cam, dz_cam)|; observed pixel change is |(du-du2, dv-dv2)|.
-      if (!scale_measured) {
+      // Skipped when the move also changed height.
+      if (!scale_measured && !height_changed) {
         const double d_pix = std::hypot(du - du2, dv - dv2);
         const double d_m   = std::hypot(dy_cam, dz_cam);
         if (d_m > 1e-4 && d_pix > center_min_probe_px_) {
@@ -902,8 +994,8 @@ private:
   }
 
   // After servoing, recompute C and R from the arm's ACTUAL camera pose (TF),
-  // not the stale detection. C.xy = camera xy in arm frame; C.z = ground plane;
-  // R = camera height above ground.
+  // not the stale detection. C = camera position dropped along the ground
+  // normal onto the ground plane (arm frame); R = camera height above ground.
   bool update_center_from_tf()
   {
     geometry_msgs::msg::TransformStamped foot_to_cam;
@@ -925,9 +1017,16 @@ private:
       return false;
     }
 
-    target_center_base_.x = base_to_cam.transform.translation.x;
-    target_center_base_.y = base_to_cam.transform.translation.y;
-    target_center_base_.z = base_to_cam.transform.translation.z - cam_height;
+    tf2::Vector3 gx, gy, up;
+    if (!ground_basis_in_arm(gx, gy, up)) return false;
+
+    const tf2::Vector3 cam(base_to_cam.transform.translation.x,
+                           base_to_cam.transform.translation.y,
+                           base_to_cam.transform.translation.z);
+    const tf2::Vector3 Cv = cam - cam_height * up;
+    target_center_base_.x = Cv.x();
+    target_center_base_.y = Cv.y();
+    target_center_base_.z = Cv.z();
     capture_radius_ = cam_height;
 
     RCLCPP_INFO(get_logger(),
@@ -952,8 +1051,9 @@ private:
                 cov0, target_coverage);
 
     double R = capture_radius_ * std::sqrt(cov0 / target_coverage);
-    if (!go_to_pole_pose(C, R)) {
-      RCLCPP_WARN(get_logger(), "[Calibrate] one-shot pole pose unreachable at R=%.3f", R);
+    if (!go_to_pole_pose_lowering(C, R)) {
+      RCLCPP_WARN(get_logger(), "[Calibrate] one-shot pole pose unreachable down to R=%.3f",
+                  initial_radius_min_);
       return false;
     }
 
@@ -1010,6 +1110,22 @@ private:
     return true;
   }
 
+  // Straight-down pose at C, lowering R by initial_radius_step_ on each planning
+  // failure until initial_radius_min_. On success R holds the radius actually used.
+  bool go_to_pole_pose_lowering(const geometry_msgs::msg::Point &C, double &R)
+  {
+    for (double r = R; r >= initial_radius_min_; r -= initial_radius_step_) {
+      if (go_to_pole_pose(C, r)) {
+        if (r < R) RCLCPP_INFO(get_logger(), "[Pole] reached at reduced R=%.3f (from %.3f)", r, R);
+        R = r;
+        return true;
+      }
+      RCLCPP_WARN(get_logger(), "[Pole] unreachable at R=%.3f; reducing by %.2f m",
+                  r, initial_radius_step_);
+    }
+    return false;
+  }
+
 
   // === Main collection routine ==============================================
 
@@ -1035,14 +1151,18 @@ private:
       goal_handle->abort(result);
       return;
     }
-    if (!go_to_pole_pose(target_center_base_, capture_radius_)) {
-      RCLCPP_WARN(get_logger(), "[Calibrate] failed to reach initial straight-down pose");
+    double R0 = capture_radius_;
+    if (!go_to_pole_pose_lowering(target_center_base_, R0)) {
+      RCLCPP_WARN(get_logger(), "[Calibrate] failed to reach initial straight-down pose down to R=%.3f",
+                  initial_radius_min_);
       clear_body();
       clear_planning_scene();
       move_arm_to_stow_pose();
       goal_handle->abort(result);
       return;
     }
+    capture_radius_ = R0;
+    log_camera_tilt();
 
     // Center the target under the camera by shifting C and re-planning the
     // straight-down pose (no joint commands, orientation rebuilt each step).
@@ -1067,8 +1187,8 @@ private:
 
     setup_planning_scene();
 
-    if (!initial_calibration(min_conf, 0.15)) {
-      if(!initial_calibration(min_conf,0.20)) {
+    if (!initial_calibration(min_conf, 0.10)) {
+      if(!initial_calibration(min_conf,0.15)) {
         RCLCPP_WARN(get_logger(), "[Calibrate] Failed to complete calibration");
         clear_body();
         clear_planning_scene();
@@ -1155,7 +1275,8 @@ private:
     clear_planning_scene();
     move_arm_to_stow_pose();
     RCLCPP_INFO(get_logger(), "collection done: %d captured, %d dropped, %d skipped",
-                captured, dropped, skipped);    result->success = true;
+                captured, dropped, skipped);
+    result->success = true;
     goal_handle->succeed(result);
   }
 
@@ -1184,6 +1305,8 @@ private:
   // Set by calibration, consumed by main_image_collection
   geometry_msgs::msg::Point target_center_base_;
   double capture_radius_{0.0};
+  const double initial_radius_step_ = 0.03;   // reduce R by 3 cm per failed attempt
+  const double initial_radius_min_  = 0.15;   // stop retrying below this R
 
   std::mutex joint_state_mutex_;
   std::map<std::string, double> latest_joint_positions_;

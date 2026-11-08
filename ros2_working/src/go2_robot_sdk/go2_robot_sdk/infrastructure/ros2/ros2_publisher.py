@@ -34,6 +34,21 @@ def yaw_to_quat(yaw: float):
     q[2] = math.sin(yaw * 0.5)
     return q
 
+def _qmul(a, b):
+    ax, ay, az, aw = a; bx, by, bz, bw = b
+    return (aw*bx + ax*bw + ay*bz - az*by,
+            aw*by - ax*bz + ay*bw + az*bx,
+            aw*bz + ax*by - ay*bx + az*bw,
+            aw*bw - ax*bx - ay*by - az*bz)
+
+def _qconj(q):
+    return (-q[0], -q[1], -q[2], q[3])
+
+def _qrot(q, v):
+    x, y, z, _ = _qmul(_qmul(q, (v[0], v[1], v[2], 0.0)), _qconj(q))
+    return (x, y, z)
+
+
 rotation_correction = 0
 
 corr_quat = yaw_to_quat(rotation_correction*math.pi/180)
@@ -94,10 +109,6 @@ class ROS2Publisher(IRobotDataPublisher):
         z = float(orientation['z'])
         w = float(orientation['w'])
 
-        current_orientation = [x,y, z, w]
-        corrected_orientation = quaternion_multiply(corr_quat,current_orientation)
-        norm = math.sqrt(corrected_orientation[0]**2+corrected_orientation[1]**2+corrected_orientation[2]**2+corrected_orientation[3]**2)
-
 
         odom_trans.transform.rotation.x = x
         odom_trans.transform.rotation.y = y
@@ -119,32 +130,33 @@ class ROS2Publisher(IRobotDataPublisher):
         
     #Transform from base_link to base_footprint
     def _publish_footprint(self):
-        foot_print_trans = TransformStamped()
-        foot_print_trans.header.stamp=self.node.get_clock().now().to_msg()
-        foot_print_trans.header.frame_id = 'base_link'
-        foot_print_trans.child_frame_id = 'base_footprint'
-
         try:
-            t = self.tf_buffer.lookup_transform(
-                'odom',
-                'base_link',
-                rclpy.time.Time()
-            )
+            t = self.tf_buffer.lookup_transform('odom', 'base_link', rclpy.time.Time())
         except Exception as e:
             logger.debug(f"TF lookup failed: {e}")
             return
+
+        r = t.transform.rotation
+        q_bl = (r.x, r.y, r.z, r.w)                       # base_link attitude in odom
+        z_bl = t.transform.translation.z
+        z_ground = 0.0                                    # odom z of the ground (see note)
+
         
-        foot_print_trans.transform.translation.x = 0.0
-        foot_print_trans.transform.translation.y = 0.0
-        foot_print_trans.transform.translation.z = -t.transform.translation.z
+        yaw = math.atan2(2*(r.w*r.z + r.x*r.y), 1 - 2*(r.y*r.y + r.z*r.z))
+        q_level = (0.0, 0.0, math.sin(yaw/2), math.cos(yaw/2))
 
-        foot_print_trans.transform.rotation.x = 0.0
-        foot_print_trans.transform.rotation.y = 0.0
-        foot_print_trans.transform.rotation.z = 0.0
-        foot_print_trans.transform.rotation.w = 1.0
+        
+        q_rel = _qmul(_qconj(q_bl), q_level)
+        p_rel = _qrot(_qconj(q_bl), (0.0, 0.0, z_ground - z_bl))
 
-
-        self.broadcaster.sendTransform(foot_print_trans)
+        msg = TransformStamped()
+        msg.header.stamp = t.header.stamp                 
+        msg.header.frame_id = 'base_link'
+        msg.child_frame_id = 'base_footprint'
+        msg.transform.translation.x, msg.transform.translation.y, msg.transform.translation.z = p_rel
+        (msg.transform.rotation.x, msg.transform.rotation.y,
+        msg.transform.rotation.z, msg.transform.rotation.w) = q_rel
+        self.broadcaster.sendTransform(msg)    
 
     def _publish_odometry_topic(self, robot_data: RobotData, robot_idx: int) -> None:
         """Publish Odometry topic"""
@@ -169,9 +181,7 @@ class ROS2Publisher(IRobotDataPublisher):
         z = float(orientation['z'])
         w = float(orientation['w'])
 
-        current_orientation = [x,y, z, w]
-        corrected_orientation = quaternion_multiply(corr_quat,current_orientation)
-        norm = math.sqrt(corrected_orientation[0]**2+corrected_orientation[1]**2+corrected_orientation[2]**2+corrected_orientation[3]**2)
+
 
 
         odom_msg.pose.pose.orientation.x = x

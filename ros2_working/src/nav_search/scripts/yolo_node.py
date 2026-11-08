@@ -17,6 +17,7 @@ from ament_index_python.packages import get_package_share_directory
 import cv2 as cv
 import cameratransform as ct
 import numpy as np
+import subprocess
 
 
 def euler_from_quaternion(x, y, z, w):
@@ -49,16 +50,18 @@ class YoloDetectNode(Node):
     def __init__(self):
         super().__init__("yolo_node")
 
+        
+        #Chenge on dog
         model_path = os.path.join(
         get_package_share_directory("nav_search"),
         "models",
-        "pipes.pt"
+        "pipe_2048_11_8.onnx"
         )
         self.model = YOLO(model_path)
 
         #REMOVE ON DOG
         self.date_time = datetime.datetime.now()
-        self.save_path = f"/home/drl/Data/3D_const_images/{self.date_time}"
+        #self.save_path = f"/home/drl/Data/3D_const_images/{self.date_time}"
         self.img_num = 0
         #REMOVE ON DOG
         
@@ -110,32 +113,28 @@ class YoloDetectNode(Node):
         self.HEADING = 0
         self.ROLL = 0
         self.objheight = 0
-        self.BLUR_THRESHOLD = 900.0
-        self.SHARP_TIMEOUT = 5.0 # seconds to wait for a sharp frame before giving up
 
         #remove from dog      
         #os.mkdir(self.save_path)
 
-    def set_cameras(self):
-        self.eo_cam = cv.VideoCapture("/dev/arm_cam",cv.CAP_V4L2)
-        self.ir_cam = cv.VideoCapture("/dev/boson",cv.CAP_V4L2)
+    
 
+    def set_cameras(self):
+        self.eo_cam = cv.VideoCapture("/dev/arm_cam", cv.CAP_V4L2)
+        self.ir_cam = cv.VideoCapture("/dev/boson", cv.CAP_V4L2)
 
         self.eo_cam.set(cv.CAP_PROP_FOURCC, cv.VideoWriter_fourcc(*"MJPG"))
         self.eo_cam.set(cv.CAP_PROP_FRAME_WIDTH,  self.CAPTURE_WIDTH)
         self.eo_cam.set(cv.CAP_PROP_FRAME_HEIGHT, self.CAPTURE_HEIGHT)
         self.eo_cam.set(cv.CAP_PROP_BUFFERSIZE, 1)
-        
 
         self.ir_cam.set(cv.CAP_PROP_FOURCC, cv.VideoWriter_fourcc(*"MJPG"))
         self.ir_cam.set(cv.CAP_PROP_FRAME_WIDTH,  self.CAPTURE_WIDTH_2)
         self.ir_cam.set(cv.CAP_PROP_FRAME_HEIGHT, self.CAPTURE_HEIGHT_2)
         self.ir_cam.set(cv.CAP_PROP_BUFFERSIZE, 1)
 
-
         if not self.eo_cam.isOpened():
             self.get_logger().error('Failed to set cameras')
-
 
 
 
@@ -147,6 +146,19 @@ class YoloDetectNode(Node):
         self.get_logger().info(f"Capture resolution: {actual_w_ir} x {actual_h_ir}")
         self.initialize = True
 
+    def set_focus_man(self):
+
+        # manual focus via OpenCV, with startup nudge so the lens actually moves
+        self.eo_cam.read()                                 # prime the stream
+        self.eo_cam.set(cv.CAP_PROP_AUTOFOCUS, 0)
+        time.sleep(0.2)
+        self.eo_cam.set(cv.CAP_PROP_FOCUS, 530.0)          # nudge off target
+        time.sleep(0.3)
+        self.eo_cam.set(cv.CAP_PROP_FOCUS, 550.0)          # land on target
+
+    def set_focus_auto(self):
+        self.eo_cam.read()                                 # prime the stream
+        self.eo_cam.set(cv.CAP_PROP_AUTOFOCUS, 1)
 
     def camera_reset(self):
         self.eo_cam.release()
@@ -165,45 +177,6 @@ class YoloDetectNode(Node):
 
         return ret, frame
 
-
-
-    def is_blurry(self, image, threshold=1000.0):
-        """
-        Detect if an image is blurry using the Laplacian variance method.
-
-        Args:
-            image (numpy.ndarray): The input image.
-            threshold (float): Variance threshold below which the image is considered blurry.
-
-        Returns:
-            bool: True if the image is blurry, False otherwise.
-            float: The variance of the Laplacian.
-        """
-        gray = cv.cvtColor(image, cv.COLOR_BGR2GRAY)
-        laplacian = cv.Laplacian(gray, cv.CV_64F)
-        variance = laplacian.var()
-        return laplacian, variance < threshold, variance
-
-    def get_sharp_image(self):
-        # read frames on demand and return the first that passes the blur test.
-        # on timeout, return the sharpest frame seen so far (None if none arrived).
-        deadline = time.time() + self.SHARP_TIMEOUT
-        best_img = None
-        best_var = -1.0
-        while time.time() < deadline:
-            ret, frame = self.read_camera()
-
-            if not ret:
-                time.sleep(0.005)
-                continue
-            _, blur, var = self.is_blurry(frame, self.BLUR_THRESHOLD)
-            if not blur:
-                return frame
-            if var > best_var:
-                best_var = var
-                best_img = frame
-                self.get_logger().info(f'New best image collected var = {var}')
-        return best_img
 
     # Inputs:
     #   pos - an array [x,y] of the center of the object, in pixels. [0,0] is at top left of image.
@@ -285,6 +258,8 @@ class YoloDetectNode(Node):
 
     # ---- move: metric detection + nearest corners (arm base frame) ----
     def _do_move(self, goal_handle):
+        self.set_focus_man()
+
         min_conf = goal_handle.request.min_confidence
         feedback = DetectTarget.Feedback()
         feedback.progress = 0.0
@@ -292,16 +267,38 @@ class YoloDetectNode(Node):
 
         result = self._blank_result()
 
-        img = self.get_sharp_image()
-        if img is None:
+        ret,img = self.read_camera()
+        if not ret or img is None:
             self.get_logger().info(f"failure")
             goal_handle.abort()
             return result
 
         self.get_logger().info(f"image received")
 
+        try:
+            tf = self.tf_buffer.lookup_transform(
+                "base_footprint", "vx300s/camera_link", rclpy.time.Time())
+            q = tf.transform.rotation
+            position = tf.transform.translation
+            qx, qy, qz, qw = q.x, q.y, q.z, q.w
 
-        results = self.model.predict(img, conf=min_conf, imgsz = (960,1280),show=False)[0]        
+            roll, tilt, heading = euler_from_quaternion(qx, qy, qz, qw)
+            self.ROLL = -roll * 180/math.pi
+            self.TILT = 90 - (tilt *180/math.pi) 
+            self.HEADING= heading *-180/math.pi
+            self.ELEVATION = position.z
+            self.POS_X = -position.y
+            self.POS_Y = position.x
+
+        except Exception as e:
+            self.get_logger().warn(f"TF lookup failed: {e}")
+            result.confidence = best_conf
+            goal_handle.succeed()
+            return result
+
+
+        #dog
+        results = self.model.predict(img, conf=min_conf, imgsz = (1536,2048),iou=0.20,show=True)[0]        
         boxes = results.boxes
 
         if boxes is None or len(boxes) == 0:
@@ -320,26 +317,6 @@ class YoloDetectNode(Node):
             goal_handle.succeed()
             return result
 
-        try:
-            tf = self.tf_buffer.lookup_transform(
-                "base_footprint", "vx300s/camera_link", rclpy.time.Time())
-            q = tf.transform.rotation
-            position = tf.transform.translation
-            qx, qy, qz, qw = q.x, q.y, q.z, q.w
-
-            roll, tilt, heading = euler_from_quaternion(qx, qy, qz, qw)
-            self.ROLL = roll * 180/math.pi
-            self.TILT = 90 - (tilt *180/math.pi) -2
-            self.HEADING= heading *-180/math.pi
-            self.ELEVATION = position.z
-            self.POS_X = -position.y
-            self.POS_Y = position.x
-
-        except Exception as e:
-            self.get_logger().warn(f"TF lookup failed: {e}")
-            result.confidence = best_conf
-            goal_handle.succeed()
-            return result
 
         x_min, y_min, x_max, y_max = best.xyxy[0].tolist()
         u = (x_min + x_max) / 2.0
@@ -409,8 +386,8 @@ class YoloDetectNode(Node):
 
         result = self._blank_result()
 
-        img = self.get_sharp_image()
-        if img is None:
+        ret, img = self.read_camera()
+        if not ret or img is None:
             self.get_logger().info(f"failure")
             goal_handle.abort()
             return result
@@ -418,7 +395,7 @@ class YoloDetectNode(Node):
         self.get_logger().info(f"image received")
 
         ##Change in dog
-        results = self.model.predict(img, conf=min_conf,imgsz = (960,1280), show=False)[0]        
+        results = self.model.predict(img, conf=min_conf,imgsz = (1536,2048),iou=0.20,show=True)[0]        
         boxes = results.boxes
 
         if boxes is None or len(boxes) == 0:
@@ -465,14 +442,20 @@ class YoloDetectNode(Node):
         feedback.progress = 0.0
         goal_handle.publish_feedback(feedback)
 
+        self.set_focus_man()
+
+        time.sleep(0.5)
+
         result = self._blank_result()
 
-        img = self.get_sharp_image()
+
+
+        ret,img = self.read_camera()
         ir_img = self. get_ir_image()
 
 
 
-        if img is None:
+        if not ret or img is None:
             self.get_logger().info("img: no sharp frame")
             goal_handle.abort()
             return result
@@ -485,7 +468,19 @@ class YoloDetectNode(Node):
 
         ok, buf = cv.imencode(".png", img)
 
-        ir_ok, buf_ir = cv.imencode(".png",ir_img)
+        try:
+            ir_ok, buf_ir = cv.imencode(".png",ir_img)
+
+            if ir_ok:
+                msg_ir = CompressedImage()
+                msg_ir.header.stamp = self.get_clock().now().to_msg()
+                msg_ir.header.frame_id = str(seq)
+                msg_ir.format = "png"
+                msg_ir.data = buf_ir.tobytes()
+                self.ir_pub.publish(msg_ir)
+
+        except:
+            self.get_logger().info('No IR image available')
 
         if not ok:
             self.get_logger().error("img: PNG encode failed")
@@ -500,12 +495,6 @@ class YoloDetectNode(Node):
         self.img_pub.publish(msg)
 
 
-        msg_ir = CompressedImage()
-        msg_ir.header.stamp = self.get_clock().now().to_msg()
-        msg_ir.header.frame_id = str(seq)
-        msg_ir.format = "png"
-        msg_ir.data = buf_ir.tobytes()
-        self.ir_pub.publish(msg_ir)
 
         self.img_num += 1
         result.found = True

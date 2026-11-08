@@ -2,6 +2,7 @@ import rclpy
 import csv
 from parrot_drone.drone_setup  import DroneAnafi
 from rclpy.node import Node
+import time
 from  geometry_msgs.msg import Vector3
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
 
@@ -23,12 +24,12 @@ class FlyDrone(Node):
 
         self.declare_parameter("test_num", f"0")
         test_num = self.get_parameter("test_num").value
-        self.csv_path = f"/home/drl/Data/target_detection/test{test_num}.csv"
+        self.csv_path = f"/home/drl/Data/fall_2026_data/target_detection/test{test_num}.csv"
         self._next_id = 0
         self._init_csv()
 
 
-        self.parrot = DroneAnafi(10,1,1)
+        self.parrot = DroneAnafi(8,1,1)
 
     def _init_csv(self):
         try:
@@ -53,6 +54,7 @@ class FlyDrone(Node):
 
         try:
             self.parrot.takeoff()
+
 
         except:
             self.get_logger().error('Failed to takeoff')
@@ -81,7 +83,7 @@ class FlyDrone(Node):
             self.get_logger().error('Failed scan step')
 
 
-        #self.land()
+        self.land()
 
 
     def land(self):

@@ -327,7 +327,7 @@ class Go2NodeFactory:
                 package='tf2_ros',
                 executable='static_transform_publisher',
                 name='arm_to_base_transform',
-                arguments=["0.07", "0", "0.12", "0", "0", "0", "base_link", "vx300s/base_link"]
+                arguments=["0.07", "0", "0.12", "0", "-0.0026", "0", "base_link", "vx300s/base_link"]
             ),
     ]
 

@@ -91,7 +91,7 @@ public:
     radius_max_           = this->declare_parameter<double>("camera_radius_max",   0.3);
     radius_scale_factor_  = this->declare_parameter<double>("camera_radius_scale", 0.2);
 
-    side_offset_       = this->declare_parameter<double>("side_offset", 0.35);
+    side_offset_       = this->declare_parameter<double>("side_offset", 0.32);
     yaw_tolerance_rad_ = this->declare_parameter<double>("yaw_tolerance_rad", 0.05);
 
     // --- Joint move polling ---
@@ -102,8 +102,8 @@ public:
     // --- FSM tunables ---
     max_sweeps_             = this->declare_parameter<int>("max_sweeps", 3);
     desired_final_distance_ = this->declare_parameter<double>("desired_final_distance", 0.35);
-    nav2_switch_distance_   = this->declare_parameter<double>("nav2_switch_distance", 1.00);
-    nav2_approach_margin_   = this->declare_parameter<double>("nav2_approach_margin", 0.3);
+    nav2_switch_distance_   = this->declare_parameter<double>("nav2_switch_distance", 0.80);
+    nav2_approach_margin_   = this->declare_parameter<double>("nav2_approach_margin", 0.4);
     max_trusted_travel_     = this->declare_parameter<double>("max_trusted_travel", 2.2);
 
     local_recovery_waist_range_deg_ = this->declare_parameter<double>("local_recovery_waist_range_deg", 15.0);
@@ -154,9 +154,11 @@ private:
   {
     if (move_group_) return;
 
-    RCLCPP_INFO(get_logger(), "Fetching robot_description and SRDF from /move_group...");
+    RCLCPP_INFO(get_logger(), "Fetching robot_description, SRDF, and kinematics from /move_group...");
 
-    auto param_node = rclcpp::Node::make_shared("arm_search_param_client");
+    auto param_node = rclcpp::Node::make_shared(
+      "arm_search_param_client",
+      rclcpp::NodeOptions().use_global_arguments(false));
     const std::string move_group_node_name = "/move_group";
 
     auto param_client = std::make_shared<rclcpp::AsyncParametersClient>(
@@ -172,11 +174,26 @@ private:
                   move_group_node_name.c_str());
     }
 
-    auto future = param_client->get_parameters(
-      {"robot_description", "robot_description_semantic"});
-
     rclcpp::executors::SingleThreadedExecutor exec;
     exec.add_node(param_node);
+
+    auto list_future = param_client->list_parameters({planning_group_}, 10);
+    if (exec.spin_until_future_complete(list_future, 5s) != rclcpp::FutureReturnCode::SUCCESS) {
+      RCLCPP_ERROR(get_logger(), "Timed out listing kinematics parameters from %s",
+                   move_group_node_name.c_str());
+      exec.remove_node(param_node);
+      return;
+    }
+
+    std::vector<std::string> names;
+    for (const auto &n : list_future.get().names) {
+      if (n.find("kinematics_solver") != std::string::npos) names.push_back(n);
+    }
+    RCLCPP_INFO(get_logger(), "Fetched %zu kinematics parameters", names.size());
+    names.push_back("robot_description");
+    names.push_back("robot_description_semantic");
+
+    auto future = param_client->get_parameters(names);
     auto ret = exec.spin_until_future_complete(future, 5s);
     exec.remove_node(param_node);
 
@@ -187,13 +204,24 @@ private:
     }
 
     auto params = future.get();
-    if (!this->has_parameter("robot_description")) {
-      this->declare_parameter<std::string>("robot_description", "");
+    const std::string group_prefix = planning_group_ + ".";
+    std::vector<rclcpp::Parameter> valid;
+    for (const auto &p : params) {
+      if (p.get_type() == rclcpp::ParameterType::PARAMETER_NOT_SET) {
+        RCLCPP_INFO(get_logger(), "Skipping unset parameter '%s'", p.get_name().c_str());
+        continue;
+      }
+      std::string name = p.get_name();
+      if (name.rfind(group_prefix, 0) == 0) {
+        name = "robot_description_kinematics." + name;
+      }
+      rclcpp::Parameter q(name, p.get_parameter_value());
+      if (!this->has_parameter(name)) {
+        this->declare_parameter(name, q.get_parameter_value());
+      }
+      valid.push_back(q);
     }
-    if (!this->has_parameter("robot_description_semantic")) {
-      this->declare_parameter<std::string>("robot_description_semantic", "");
-    }
-    this->set_parameters(params);
+    this->set_parameters(valid);
 
     RCLCPP_INFO(get_logger(), "Initializing MoveGroupInterface...");
     move_group_ = std::make_shared<moveit::planning_interface::MoveGroupInterface>(
@@ -394,7 +422,7 @@ private:
 
   // === Camera-circle pose computation =======================================
 
-  geometry_msgs::msg::Pose compute_camera_pose_on_circle(const geometry_msgs::msg::Point &target_arm)
+  geometry_msgs::msg::Pose compute_camera_pose_on_circle(const geometry_msgs::msg::Point &target_arm,double height)
   {
     double X = target_arm.x, Y = target_arm.y, Z = target_arm.z;
 
@@ -409,7 +437,7 @@ private:
     geometry_msgs::msg::Pose cam_pose;
     cam_pose.position.x = ux * R_des;
     cam_pose.position.y = uy * R_des;
-    cam_pose.position.z = camera_height_;
+    cam_pose.position.z = height;
 
     tf2::Vector3 cam_pos(cam_pose.position.x, cam_pose.position.y, cam_pose.position.z);
     tf2::Vector3 tgt_pos(X, Y, Z);
@@ -472,10 +500,6 @@ private:
 
     double roll, pitch, yaw;
     tf2::Matrix3x3(T_base_ee.getRotation()).getRPY(roll, pitch, yaw);
-    RCLCPP_INFO(get_logger(),
-      "EE pose in base: X=%.3f Y=%.3f Z=%.3f | RPY(deg) %.1f %.1f %.1f",
-      ee_pose_in_base.position.x, ee_pose_in_base.position.y, ee_pose_in_base.position.z,
-      roll * 180.0 / M_PI, pitch * 180.0 / M_PI, yaw * 180.0 / M_PI);
     return true;
   }
 
@@ -621,8 +645,41 @@ private:
       return false;
     }
 
-    geometry_msgs::msg::Pose cam_pose = compute_camera_pose_on_circle(tgt_arm.pose.position);
-    return move_arm_to_pose(cam_pose);
+        if (!move_group_) return false;
+
+    for (int i = 0; ; ++i) {
+      const double h = camera_height_ - track_height_step_ * static_cast<double>(i);
+      if (i > 0 && h < track_height_floor_ - 1e-6) break;
+
+      geometry_msgs::msg::Pose ee_pose = compute_camera_pose_on_circle(tgt_arm.pose.position, h);
+
+      move_group_->setStartStateToCurrentState();
+      move_group_->setJointValueTarget(move_group_->getCurrentJointValues());
+      if (!move_group_->setJointValueTarget(ee_pose, ee_link_)) {
+        RCLCPP_INFO(get_logger(), "[Track] no IK at camera height %.2f m", h);
+        continue;
+      }
+
+      moveit::planning_interface::MoveGroupInterface::Plan plan;
+      if (move_group_->plan(plan) != moveit::core::MoveItErrorCode::SUCCESS) {
+        RCLCPP_INFO(get_logger(), "[Track] IK ok but no plan at camera height %.2f m", h);
+        continue;
+      }
+      if (move_group_->execute(plan) != moveit::core::MoveItErrorCode::SUCCESS) {
+        RCLCPP_WARN(get_logger(), "[Track] execution failed at camera height %.2f m", h);
+        return false;
+      }
+
+      if (i > 0) {
+        RCLCPP_WARN(get_logger(), "[Track] tracked at reduced camera height %.2f m (nominal %.2f)",
+                    h, camera_height_);
+      }
+      return true;
+    }
+
+    RCLCPP_WARN(get_logger(), "[Track] no feasible pose from %.2f m down to %.2f m",
+                camera_height_, track_height_floor_);
+    return false;
   }
 
   // === MoveIt named poses ===================================================
@@ -913,13 +970,13 @@ private:
 
     double s_sq_diff = remain_dist*remain_dist - s*s;
     if (s_sq_diff < 0.0) {
-      RCLCPP_WARN(get_logger(),
-        "[VelocityApproach] offset (%.3f) exceeds remaining distance (%.3f); clamping drive to 0",
-        s, remain_dist);
-      drive_dist = 0.0;
-    } else {
-      drive_dist = std::sqrt(s_sq_diff);
-    }
+       RCLCPP_WARN(get_logger(),
+        "[VelocityApproach] offset (%.3f) exceeds remaining distance (%.3f); no drive, no turn",
+         s, remain_dist);
+
+      return true;
+     }
+    drive_dist = std::sqrt(s_sq_diff);
 
     // Two candidate relative turns; take the smaller-magnitude one.
     double delta_left  = normalize_angle(theta_rel - angle_to_goal);
@@ -942,12 +999,7 @@ private:
     }
 
     double dist = std::sqrt(target_x_bl*target_x_bl + target_y_bl*target_y_bl);
-    if (dist < side_offset_ + 0.05) {
-      RCLCPP_INFO(get_logger(),
-        "[VelocityApproach] already closer than side_offset (dist=%.3f side=%.3f)",
-        dist, side_offset_);
-      return true;
-    }
+    if (move_dist <= 0.0) return true;
 
     const double duration = move_dist * 0.60 / forward_speed;
     RCLCPP_INFO(get_logger(), "Driving relative: dist=%.2f m vx=%.2f dur=%.2f s",
@@ -966,6 +1018,31 @@ private:
 
     RCLCPP_INFO(get_logger(), "[VelocityApproach] estimated remaining distance ~ %.3f m",
                 dist - move_dist);
+    return true;
+  }
+
+
+  bool complete_movement_fwd(double dist, double speed = 0.20)
+  {
+    if (!cmd_vel_pub_) return false;
+    double x0, y0, yaw0;
+    if (!get_robot_pose_odom_fast(x0, y0, yaw0)) return false;
+
+    RCLCPP_INFO(get_logger(), "[Nudge] forward %.3f m", dist);
+    geometry_msgs::msg::Twist cmd;
+    cmd.linear.x = speed;
+    rclcpp::Rate rate(50.0);
+    auto start = this->now();
+    const double timeout_s = (dist / speed) * 3.0 + 2.0;
+
+    while (rclcpp::ok() && (this->now() - start).seconds() < timeout_s) {
+      double x, y, yaw;
+      if (get_robot_pose_odom_fast(x, y, yaw) && std::hypot(x - x0, y - y0) >= dist) break;
+      cmd_vel_pub_->publish(cmd);
+      rate.sleep();
+    }
+    cmd_vel_pub_->publish(geometry_msgs::msg::Twist{});   // stop
+    rclcpp::sleep_for(400ms);
     return true;
   }
 
@@ -1214,6 +1291,12 @@ private:
           double xb, yb;
           if (track_target_once(ctx.target_x_odom, ctx.target_y_odom) &&
               call_detect_target(goal->min_confidence, xb, yb)) {
+             double odom_x, odom_y;
+
+             if (transform_arm_point_to_odom(xb, yb, odom_x, odom_y)) {
+              ctx.target_x_odom = odom_x; ctx.target_y_odom = odom_y;
+              last_known_x_odom_ = odom_x; last_known_y_odom_ = odom_y;
+            }
             ctx.x_base_last = xb; ctx.y_base_last = yb;
             result->x_base = static_cast<float>(xb);
             result->y_base = static_cast<float>(yb);
@@ -1261,11 +1344,26 @@ private:
             break;
           }
 
+          if (move_dist <= 0.0) {
+             if (target_x_bl < 0.02) {
+               // Already abeam; forward motion can't close range further.
+               state = ScanState::FINAL_INSPECTION;
+               break;
+             }
+             complete_movement_fwd(target_x_bl);
+          }
+
           rclcpp::sleep_for(1s);   // let the estimator settle before re-aiming
 
           double xb, yb;
           if (track_target_once(ctx.target_x_odom, ctx.target_y_odom) &&
               call_detect_target(goal->min_confidence, xb, yb)) {
+            double odom_x, odom_y;
+            if (transform_arm_point_to_odom(xb, yb, odom_x, odom_y)) {
+              ctx.target_x_odom = odom_x; ctx.target_y_odom = odom_y;
+              last_known_x_odom_ = odom_x; last_known_y_odom_ = odom_y;
+            }
+
             ctx.x_base_last = xb; ctx.y_base_last = yb;
             result->x_base = static_cast<float>(xb);
             result->y_base = static_cast<float>(yb);
@@ -1358,6 +1456,8 @@ private:
   double last_known_x_odom_ = 0.0;
   double last_known_y_odom_ = 0.0;
   bool   has_last_known_position_ = false;
+  const double track_height_step_  = 0.05;
+  const double track_height_floor_ = 0.30;
 
   std::string gps_gate_service_;
 

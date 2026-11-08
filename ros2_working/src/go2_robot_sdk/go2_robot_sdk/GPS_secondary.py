@@ -260,6 +260,8 @@ class GPSNode(Node):
             with self._pos_lock:
                 self.initial_position = [self.current_lon,self.current_lat]
 
+            self.get_logger().info("Initial position logged")
+
     def _cb_odom(self,msg: Odometry):
         with self.odom_lock:
             position = msg.pose.pose.position

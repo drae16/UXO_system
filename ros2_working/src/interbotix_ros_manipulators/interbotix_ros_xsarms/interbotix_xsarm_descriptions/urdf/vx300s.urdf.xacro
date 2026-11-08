@@ -760,7 +760,7 @@
         <joint name="camera" type="fixed">
           <axis xyz="1 0 0"/>
           <origin
-            rpy="0 0 0"
+            rpy="0 0.1232 0.0449"
             xyz="0.01 0 -0.01"/>
           <parent
             link="$(arg robot_name)/ee_gripper_link"/>

@@ -32,6 +32,7 @@ def generate_launch_description():
             executable='construct_target',
             name='construct_target',
             output='screen',
+            remappings=[('joint_states', '/vx300s/joint_states')]
         ),
 
         Node(
