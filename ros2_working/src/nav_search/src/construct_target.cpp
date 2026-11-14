@@ -290,7 +290,7 @@ private:
 
   void setup_planning_scene()
   {
-    // ---- MEASURE THESE ----
+
     const double ground_size_xy = 3.0;    // m, plane extent (square)
     const double ground_thick   = 0.02;   // m, box thickness
     const double ground_z       = 0.0;    // m in base_footprint (top at ground)
@@ -309,12 +309,12 @@ private:
     const double gps_cy = 0.0;
     const double gps_cz = 0.025;
 
-    const double antenna_len_x = 0.05;        // m
+    const double antenna_len_x = 0.15;        // m
     const double antenna_wid_y = 0.10;        // m
-    const double antenna_hgt_z = 0.07;        // m
-    const double antenna_cx = 0.235;
+    const double antenna_hgt_z = 0.12;        // m
+    const double antenna_cx = 0.28;
     const double antenna_cy = 0.0;
-    const double antenna_cz = 0.065;
+    const double antenna_cz = 0.10;
 
     const double cam_len_x = 0.08;        // m
     const double cam_wid_y = 0.07;        // m
@@ -329,7 +329,6 @@ private:
     const double boundary_cx = 0.55;
     const double boundary_cy = 0.0;
     const double boundary_cz = 0.05;
-
 
 
 
@@ -465,6 +464,8 @@ private:
       bound2.operation = moveit_msgs::msg::CollisionObject::ADD;
       world_objects.push_back(bound2);
     }
+
+   
 
     if (!world_objects.empty()) {
       psi.applyCollisionObjects(world_objects);
@@ -697,7 +698,7 @@ private:
     goal_msg.mode = "cal";
 
     auto future_goal = detect_client_->async_send_goal(goal_msg, DetectClient::SendGoalOptions());
-    if (future_goal.wait_for(5s) != std::future_status::ready) {
+    if (future_goal.wait_for(10s) != std::future_status::ready) {
       RCLCPP_WARN(get_logger(), "Timeout waiting for detect_target goal response");
       return false;
     }
@@ -708,7 +709,7 @@ private:
     }
 
     auto result_future = detect_client_->async_get_result(goal_handle);
-    if (result_future.wait_for(10s) != std::future_status::ready) {
+    if (result_future.wait_for(20s) != std::future_status::ready) {
       RCLCPP_WARN(get_logger(), "Timeout waiting for detect_target result");
       return false;
     }
@@ -832,7 +833,7 @@ private:
     goal_msg.mode = "img";
 
     auto future_goal = detect_client_->async_send_goal(goal_msg, DetectClient::SendGoalOptions());
-    if (future_goal.wait_for(5s) != std::future_status::ready) {
+    if (future_goal.wait_for(10s) != std::future_status::ready) {
       RCLCPP_WARN(get_logger(), "Timeout waiting for detect_target goal response");
       return false;
     }
@@ -843,7 +844,7 @@ private:
     }
 
     auto result_future = detect_client_->async_get_result(goal_handle);
-    if (result_future.wait_for(10s) != std::future_status::ready) {
+    if (result_future.wait_for(20s) != std::future_status::ready) {
       RCLCPP_WARN(get_logger(), "Timeout waiting for detect_target result");
       return false;
     }
@@ -1187,8 +1188,8 @@ private:
 
     setup_planning_scene();
 
-    if (!initial_calibration(min_conf, 0.10)) {
-      if(!initial_calibration(min_conf,0.15)) {
+    if (!initial_calibration(min_conf, 0.25)) {
+      if(!initial_calibration(min_conf,0.30)) {
         RCLCPP_WARN(get_logger(), "[Calibrate] Failed to complete calibration");
         clear_body();
         clear_planning_scene();

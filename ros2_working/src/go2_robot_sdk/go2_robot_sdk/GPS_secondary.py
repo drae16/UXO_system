@@ -416,8 +416,6 @@ class GPSNode(Node):
         located_y = scan.y_base
         target_ll = self.estimate_target_global(located_x, located_y)
 
-        self.go_prone()
-        time.sleep(2.5)
 
         construct = self.navigator.call_3d_reconstruction()
 

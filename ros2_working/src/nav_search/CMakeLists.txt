@@ -18,6 +18,7 @@ find_package(tf2_geometry_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(control_msgs REQUIRED)
 #find_package(go2_robot_sdk REQUIRED)
+find_package(go2_interfaces REQUIRED)
 find_package(interbotix_xs_msgs REQUIRED)
 
 
@@ -42,6 +43,7 @@ ament_target_dependencies(
   tf2_ros
   tf2_geometry_msgs
   interbotix_xs_msgs
+  go2_interfaces
 )
 
 rosidl_target_interfaces(arm_search

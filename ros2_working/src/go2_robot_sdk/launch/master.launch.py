@@ -12,11 +12,20 @@ def generate_launch_description():
     # If the two launch files are in the SAME directory as this master:
     launch_a = os.path.join(get_package_share_directory('go2_robot_sdk'), 'launch', 'robot.launch.py')
     launch_b = os.path.join(get_package_share_directory('interbotix_xsarm_moveit'), 'launch', 'xsarm_moveit.launch.py')
+    launch_c = os.path.join(get_package_share_directory('y3space_driver'), 'launch', 'yost_imu_launch.py')
 
 
     return LaunchDescription([
         # Include your existing launch files
         IncludeLaunchDescription(PythonLaunchDescriptionSource(launch_a)),
+        IncludeLaunchDescription(PythonLaunchDescriptionSource(launch_c)),
+        IncludeLaunchDescription(PythonLaunchDescriptionSource(launch_b),
+                         launch_arguments = {
+                             'robot_model': 'vx300s',
+                             'hardware_type': 'actual',
+                             'use_world_frame': 'false'
+                         }.items()
+                         ),
 
         # Add your two additional nodes here
         Node(
@@ -42,13 +51,7 @@ def generate_launch_description():
             output='screen',
         ),
 
-        IncludeLaunchDescription(PythonLaunchDescriptionSource(launch_b),
-                                 launch_arguments = {
-                                     'robot_model': 'vx300s',
-                                     'hardware_type': 'actual',
-                                     'use_world_frame': 'false'
-                                 }.items()
-                                 ),
+
         Node(
             package='nav_search',
             executable='gps_gate_node',

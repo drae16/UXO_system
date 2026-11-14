@@ -80,6 +80,9 @@ class YoloDetectNode(Node):
         self.eo_cam = None
         self.ir_cam = None
 
+        self.SHARP_TIMEOUT = 10
+        self.BLUR_THRESHOLD = 900
+
         self.CAPTURE_WIDTH = 2048
         self.CAPTURE_HEIGHT = 1536
         self.IMAGE_SIZE = (2048,1536)
@@ -176,6 +179,43 @@ class YoloDetectNode(Node):
             ret, frame = self.eo_cam.read()
 
         return ret, frame
+
+    def is_blurry(self, image, threshold=1000.0):
+        """
+        Detect if an image is blurry using the Laplacian variance method.
+
+        Args:
+            image (numpy.ndarray): The input image.
+            threshold (float): Variance threshold below which the image is considered blurry.
+
+        Returns:
+            bool: True if the image is blurry, False otherwise.
+            float: The variance of the Laplacian.
+        """
+        gray = cv.cvtColor(image, cv.COLOR_BGR2GRAY)
+        laplacian = cv.Laplacian(gray, cv.CV_64F)
+        variance = laplacian.var()
+        return laplacian, variance < threshold, variance
+
+    def get_sharp_image(self):
+        # read frames on demand and return the first that passes the blur test.
+        # on timeout, return the sharpest frame seen so far (None if none arrived).
+        deadline = time.time() + self.SHARP_TIMEOUT
+        best_img = None
+        best_var = -1.0
+        while time.time() < deadline:
+            ret, frame = self.eo_cam.read()
+            ret, frame = self.eo_cam.read()
+            if not ret:
+                time.sleep(0.005)
+                continue
+            _, blur, var = self.is_blurry(frame, self.BLUR_THRESHOLD)
+            if not blur:
+                return frame
+            if var > best_var:
+                best_var = var
+                best_img = frame
+        return best_img
 
 
     # Inputs:
@@ -350,7 +390,6 @@ class YoloDetectNode(Node):
 
 
         dist = math.sqrt(result.x_base**2 + result.y_base**2)
-        self.get_logger().info(f"Coordinates found x= {result.x_base},y = {result.y_base},z= {z_base}")
         self.get_logger().info(f"Coordinates found distance= {dist}")
         result.confidence = best_conf
 
@@ -367,10 +406,6 @@ class YoloDetectNode(Node):
         result.near_y1 = corner_candidates[0][2]
         result.near_x2 = corner_candidates[1][1]
         result.near_y2 = corner_candidates[1][2]
-        self.get_logger().info(
-            f"Nearest corners: ({result.near_x1:.3f},{result.near_y1:.3f}) dist={corner_candidates[0][0]:.3f}, "
-            f"({result.near_x2:.3f},{result.near_y2:.3f}) dist={corner_candidates[1][0]:.3f}"
-        )
 
         feedback.progress = 100.0
         goal_handle.publish_feedback(feedback)
@@ -442,21 +477,21 @@ class YoloDetectNode(Node):
         feedback.progress = 0.0
         goal_handle.publish_feedback(feedback)
 
-        self.set_focus_man()
+        self.set_focus_auto()
 
-        time.sleep(0.5)
+       
 
         result = self._blank_result()
 
 
 
-        ret,img = self.read_camera()
+        img = self.get_sharp_image()
         ir_img = self. get_ir_image()
 
 
 
-        if not ret or img is None:
-            self.get_logger().info("img: no sharp frame")
+        if img is None:
+            self.get_logger().info("No Image collected")
             goal_handle.abort()
             return result
 

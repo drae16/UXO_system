@@ -1,0 +1,34 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>y3space_driver</name>
+  <version>0.0.0</version>
+  <description>Yost Lab 3-Space ROS Driver Package</description>
+
+  <maintainer email="jgomallette@gmail.com">Jeremy (MrCerealKiller)</maintainer>
+  <author email="cagatay@robostate.com">cagatay</author>
+  <author email="jgomallette@gmail.com">Jeremy (MrCerealKiller)</author>
+
+  <license>MIT</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <depend>geometry_msgs</depend>
+  <depend>rclcpp</depend>
+  <depend>rclpy</depend>
+  <depend>sensor_msgs</depend>
+  <depend>serial</depend>
+  <depend>std_msgs</depend>
+  <depend>tf2</depend>
+  <depend>tf2_geometry_msgs</depend>
+  <depend>tf2_ros</depend>      
+
+
+  <exec_depend>ros2launch</exec_depend>
+      
+  <test_depend>ament_cmake_gtest</test_depend>
+
+  <export>
+		<build_type>ament_cmake</build_type>
+	</export>
+
+</package>

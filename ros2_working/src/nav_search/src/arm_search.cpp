@@ -33,6 +33,8 @@
 #include "nav_search/srv/track_target.hpp"
 #include "nav2_msgs/action/navigate_to_pose.hpp"
 
+#include <go2_interfaces/msg/web_rtc_req.hpp>
+
 using namespace std::chrono_literals;
 
 enum class ScanState {
@@ -91,7 +93,7 @@ public:
     radius_max_           = this->declare_parameter<double>("camera_radius_max",   0.3);
     radius_scale_factor_  = this->declare_parameter<double>("camera_radius_scale", 0.2);
 
-    side_offset_       = this->declare_parameter<double>("side_offset", 0.32);
+    side_offset_       = this->declare_parameter<double>("side_offset", 0.31);
     yaw_tolerance_rad_ = this->declare_parameter<double>("yaw_tolerance_rad", 0.05);
 
     // --- Joint move polling ---
@@ -101,10 +103,10 @@ public:
 
     // --- FSM tunables ---
     max_sweeps_             = this->declare_parameter<int>("max_sweeps", 3);
-    desired_final_distance_ = this->declare_parameter<double>("desired_final_distance", 0.35);
-    nav2_switch_distance_   = this->declare_parameter<double>("nav2_switch_distance", 0.80);
-    nav2_approach_margin_   = this->declare_parameter<double>("nav2_approach_margin", 0.4);
-    max_trusted_travel_     = this->declare_parameter<double>("max_trusted_travel", 2.2);
+    desired_final_distance_ = this->declare_parameter<double>("desired_final_distance", 0.38);
+    nav2_switch_distance_   = this->declare_parameter<double>("nav2_switch_distance", 1.0);
+    nav2_approach_margin_   = this->declare_parameter<double>("nav2_approach_margin", 0.30);
+    max_trusted_travel_     = this->declare_parameter<double>("max_trusted_travel", 1.95);
 
     local_recovery_waist_range_deg_ = this->declare_parameter<double>("local_recovery_waist_range_deg", 15.0);
     local_recovery_waist_steps_     = this->declare_parameter<int>("local_recovery_waist_steps", 5);
@@ -123,6 +125,8 @@ public:
 
     cmd_vel_pub_ = this->create_publisher<geometry_msgs::msg::Twist>(
       "/cmd_vel_out", 10);
+
+    webrtc_pub_ = this->create_publisher<go2_interfaces::msg::WebRtcReq>("/webrtc_req", 10);
 
     joint_single_pub_ = this->create_publisher<interbotix_xs_msgs::msg::JointSingleCommand>(
       "/vx300s/commands/joint_single", 10);
@@ -338,6 +342,7 @@ private:
     std::lock_guard<std::mutex> lock(odom_mutex_);
     odom_x_ = msg->pose.pose.position.x;
     odom_y_ = msg->pose.pose.position.y;
+    odom_z_ = msg->pose.pose.position.z;
     const auto & q = msg->pose.pose.orientation;
     double siny_cosp = 2.0 * (q.w * q.z + q.x * q.y);
     double cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z);
@@ -890,7 +895,7 @@ private:
   // Rotate the base by a RELATIVE yaw, closed-loop on the /odom cache (fresh,
   // no TF buffer, no map-frame composition). A stop-lead cuts the command
   // early so the body's spin-down coast lands on target instead of overshooting.
-  bool rotate_base_relative(double delta_rad, double ang_speed = 0.50)
+  bool rotate_base_relative(double delta_rad, double ang_speed = 0.5)
   {
     if (!cmd_vel_pub_) return false;
     if (std::fabs(delta_rad) < 1e-3) return true;
@@ -944,6 +949,44 @@ private:
     return true;
   }
 
+  void go_prone()
+  {
+    go2_interfaces::msg::WebRtcReq msg;
+    msg.api_id = 1005;
+    msg.topic  = "rt/api/sport/request";
+    webrtc_pub_->publish(msg);
+    RCLCPP_INFO(get_logger(), "[Prone] going prone");
+  }
+
+  // Wait until the body has dropped below the prone height and stopped moving
+  // vertically, so the re-aim uses the final prone pose.
+  bool wait_for_prone()
+  {
+    rclcpp::Rate rate(20.0);
+    auto start = this->now();
+    double z_prev = 0.0;
+    int still = 0;
+    while (rclcpp::ok() && (this->now() - start).seconds() < prone_timeout_s_) {
+      double z;
+      {
+        std::lock_guard<std::mutex> lock(odom_mutex_);
+        z = odom_z_;
+      }
+      if (z < prone_height_ && std::fabs(z - z_prev) < 0.003) {
+        if (++still >= 10) {   // 0.5 s with no vertical motion
+          RCLCPP_INFO(get_logger(), "[Prone] settled at z=%.3f m", z);
+          return true;
+        }
+      } else {
+        still = 0;
+      }
+      z_prev = z;
+      rate.sleep();
+    }
+    RCLCPP_WARN(get_logger(), "[Prone] did not settle within %.1f s", prone_timeout_s_);
+    return false;
+  }
+
   // Compute the side-approach geometry from a base_link-relative target, rotate
   // to face the offset heading, and output the forward drive distance. Both
   // rotation and drive are widened by the target's near-edge half-width so the
@@ -952,7 +995,7 @@ private:
     double target_x_bl, double target_y_bl,
     double near1_x_bl, double near1_y_bl,
     double near2_x_bl, double near2_y_bl,
-    double &drive_dist, double ang_speed = 0.50)
+    double &drive_dist, double ang_speed = 0.60)
   {
     double remain_dist = std::sqrt(target_x_bl*target_x_bl + target_y_bl*target_y_bl);
     if (remain_dist < 1e-6) { drive_dist = 0.0; return true; }
@@ -968,20 +1011,28 @@ private:
     const double s = side_offset_ + edge_half_width;
     double angle_to_goal = std::atan2(s, remain_dist);
 
+    
+
     double s_sq_diff = remain_dist*remain_dist - s*s;
     if (s_sq_diff < 0.0) {
+        s_sq_diff = s*s - remain_dist*remain_dist;
+
        RCLCPP_WARN(get_logger(),
         "[VelocityApproach] offset (%.3f) exceeds remaining distance (%.3f); no drive, no turn",
          s, remain_dist);
 
-      return true;
+      ///return true;
      }
-    drive_dist = std::sqrt(s_sq_diff);
+    drive_dist = 0.8*std::sqrt(s_sq_diff);
 
     // Two candidate relative turns; take the smaller-magnitude one.
     double delta_left  = normalize_angle(theta_rel - angle_to_goal);
     double delta_right = normalize_angle(theta_rel + angle_to_goal);
-    double delta = (std::fabs(delta_left) < std::fabs(delta_right)) ? delta_left : delta_right;
+
+    //add two to account for unbalanced lean at these short movement distances
+    double delta = (std::fabs(delta_left) < std::fabs(delta_right)) ? (delta_left) : (delta_right);
+
+
 
     RCLCPP_INFO(get_logger(),
       "[VelocityApproach] center_dist=%.3f edge_hw=%.3f offset=%.3f drive=%.3f turn=%.1f deg",
@@ -990,59 +1041,60 @@ private:
     return rotate_base_relative(delta, ang_speed);
   }
 
-  bool drive_forward_to_side_offset(double target_x_bl, double target_y_bl,
-                                    double move_dist, double forward_speed = 0.3)
+  // Drive straight by a signed distance (positive forward, negative reverse),
+  // closed-loop on /odom displacement. Speed ramps down near the end and the
+  // command stops a lead early, so /odom latency and body coast land on target.
+  bool drive_straight(double dist, double max_speed = 0.30)
   {
     if (!cmd_vel_pub_) {
       RCLCPP_WARN(get_logger(), "cmd_vel publisher not initialized");
       return false;
     }
+    const double travel = std::fabs(dist);
+    if (travel < 1e-3) return true;
 
-    double dist = std::sqrt(target_x_bl*target_x_bl + target_y_bl*target_y_bl);
-    if (move_dist <= 0.0) return true;
-
-    const double duration = move_dist * 0.60 / forward_speed;
-    RCLCPP_INFO(get_logger(), "Driving relative: dist=%.2f m vx=%.2f dur=%.2f s",
-                move_dist, forward_speed, duration);
-
-    rclcpp::Rate rate(20.0);
-    geometry_msgs::msg::Twist cmd;
-    cmd.linear.x = forward_speed;
-
-    auto start = this->now();
-    while (rclcpp::ok() && (this->now() - start).seconds() < duration) {
-      cmd_vel_pub_->publish(cmd);
-      rate.sleep();
-    }
-    cmd_vel_pub_->publish(geometry_msgs::msg::Twist{});   // stop
-
-    RCLCPP_INFO(get_logger(), "[VelocityApproach] estimated remaining distance ~ %.3f m",
-                dist - move_dist);
-    return true;
-  }
-
-
-  bool complete_movement_fwd(double dist, double speed = 0.20)
-  {
-    if (!cmd_vel_pub_) return false;
     double x0, y0, yaw0;
-    if (!get_robot_pose_odom_fast(x0, y0, yaw0)) return false;
+    if (!get_robot_pose_odom_fast(x0, y0, yaw0)) {
+      RCLCPP_WARN(get_logger(), "[Drive] no /odom yet; cannot drive");
+      return false;
+    }
 
-    RCLCPP_INFO(get_logger(), "[Nudge] forward %.3f m", dist);
-    geometry_msgs::msg::Twist cmd;
-    cmd.linear.x = speed;
+    const double sign      = (dist >= 0.0) ? 1.0 : -1.0;
+    const double timeout_s = (travel / drive_min_speed_) * 2.0 + 2.0;
+
+    RCLCPP_INFO(get_logger(), "[Drive] closed-loop %s %.3f m",
+                sign > 0.0 ? "forward" : "reverse", travel);
+
     rclcpp::Rate rate(50.0);
     auto start = this->now();
-    const double timeout_s = (dist / speed) * 3.0 + 2.0;
+    while (rclcpp::ok()) {
+      if ((this->now() - start).seconds() > timeout_s) {
+        RCLCPP_WARN(get_logger(), "[Drive] timeout");
+        break;
+      }
 
-    while (rclcpp::ok() && (this->now() - start).seconds() < timeout_s) {
       double x, y, yaw;
-      if (get_robot_pose_odom_fast(x, y, yaw) && std::hypot(x - x0, y - y0) >= dist) break;
+      if (!get_robot_pose_odom_fast(x, y, yaw)) { rate.sleep(); continue; }
+
+      const double remaining = travel - std::hypot(x - x0, y - y0);
+      const double speed = std::clamp(drive_ramp_gain_ * remaining, drive_min_speed_, max_speed);
+      if (remaining < speed * drive_stop_lead_s_) break;
+
+      geometry_msgs::msg::Twist cmd;
+      cmd.linear.x = sign * speed;
       cmd_vel_pub_->publish(cmd);
       rate.sleep();
     }
+
     cmd_vel_pub_->publish(geometry_msgs::msg::Twist{});   // stop
-    rclcpp::sleep_for(400ms);
+    rclcpp::sleep_for(400ms);                             // settle before read
+
+    double x1, y1, yaw1;
+    if (get_robot_pose_odom_fast(x1, y1, yaw1)) {
+      const double achieved = std::hypot(x1 - x0, y1 - y0);
+      RCLCPP_INFO(get_logger(), "[Drive] commanded %.3f m, achieved %.3f m, residual %.3f m",
+                  travel, achieved, travel - achieved);
+    }
     return true;
   }
 
@@ -1108,8 +1160,10 @@ private:
 
         double xb_verify, yb_verify;
         if (call_detect_target(goal->min_confidence, xb_verify, yb_verify)) {
-          target_x_odom = cand_x_odom;
-          target_y_odom = cand_y_odom;
+          if (!transform_arm_point_to_odom(xb_verify, yb_verify, target_x_odom, target_y_odom)) {
+            target_x_odom = cand_x_odom;
+            target_y_odom = cand_y_odom;
+         }
           x_base_det = xb_verify;
           y_base_det = yb_verify;
           RCLCPP_INFO(get_logger(),
@@ -1336,7 +1390,7 @@ private:
                       near1_x_bl, near1_y_bl,
                       near2_x_bl, near2_y_bl,
                       move_dist)
-                 && drive_forward_to_side_offset(target_x_bl, target_y_bl, move_dist);
+                 && drive_straight(move_dist);
 
           if (!ok) {
             RCLCPP_WARN(get_logger(), "[VELOCITY_APPROACH] rotate/drive failed");
@@ -1347,10 +1401,11 @@ private:
           if (move_dist <= 0.0) {
              if (target_x_bl < 0.02) {
                // Already abeam; forward motion can't close range further.
-               state = ScanState::FINAL_INSPECTION;
-               break;
+               drive_straight(target_x_bl);
              }
-             complete_movement_fwd(target_x_bl);
+             else {
+
+             }
           }
 
           rclcpp::sleep_for(1s);   // let the estimator settle before re-aiming
@@ -1409,8 +1464,13 @@ private:
         case ScanState::COMPLETE: {
           RCLCPP_INFO(get_logger(), "Scan complete: target at (%.3f, %.3f) odom",
                       ctx.target_x_odom, ctx.target_y_odom);
-          rclcpp::sleep_for(200ms);
-          ///move_arm_to_stow_pose();
+          // Stow, lie down, then re-aim from the prone pose for construct_target.
+          move_arm_to_stow_pose();
+          go_prone();
+          wait_for_prone();
+          if (!track_target_once(ctx.target_x_odom, ctx.target_y_odom)) {
+            RCLCPP_WARN(get_logger(), "[Prone] re-aim failed; arm left stowed");
+          }
           goal_handle->succeed(result);
           return;
         }
@@ -1449,6 +1509,9 @@ private:
   double local_recovery_waist_range_deg_;
   int    local_recovery_waist_steps_;
   double local_recovery_wrist_delta_deg_;
+  const double drive_min_speed_   = 0.20;  // m/s; floor so the Go2 actually steps
+  const double drive_ramp_gain_   = 1.0;   // 1/s; speed = gain * remaining distance
+  const double drive_stop_lead_s_ = 0.15;  // s of travel cut early for /odom latency + coast
 
   double rotation_stop_lead_s_{0.10};
 
@@ -1458,6 +1521,7 @@ private:
   bool   has_last_known_position_ = false;
   const double track_height_step_  = 0.05;
   const double track_height_floor_ = 0.30;
+ 
 
   std::string gps_gate_service_;
 
@@ -1465,6 +1529,10 @@ private:
   std::mutex odom_mutex_;
   double odom_x_{0.0}, odom_y_{0.0}, odom_yaw_{0.0};
   bool   have_odom_{false};
+
+  double odom_z_{0.0};   // add beside odom_x_, odom_y_, odom_yaw_
+  const double prone_height_    = 0.20;  // m; odom z below this counts as down (standing ~0.30)
+  const double prone_timeout_s_ = 6.0;
 
   // ROS handles
   ScanServer::SharedPtr scan_server_;
@@ -1476,6 +1544,7 @@ private:
   std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
 
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
+  rclcpp::Publisher<go2_interfaces::msg::WebRtcReq>::SharedPtr webrtc_pub_;
   rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_pub_;
   rclcpp::Publisher<interbotix_xs_msgs::msg::JointSingleCommand>::SharedPtr joint_single_pub_;
   rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_state_sub_;

@@ -29,7 +29,7 @@ class FlyDrone(Node):
         self._init_csv()
 
 
-        self.parrot = DroneAnafi(8,1,1)
+        self.parrot = DroneAnafi(12,1,1)
 
     def _init_csv(self):
         try:

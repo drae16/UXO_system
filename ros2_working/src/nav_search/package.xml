@@ -15,6 +15,7 @@
   <depend>moveit_ros_planning_interface</depend>
 
   <!-- Python deps -->
+  <depend>go2_interfaces</depend>
   <exec_depend>rclpy</exec_depend>
 
   <!-- Actions and services -->
