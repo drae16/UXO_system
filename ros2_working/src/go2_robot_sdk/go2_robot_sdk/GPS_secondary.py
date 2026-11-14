@@ -36,6 +36,18 @@ def gps_distance(lat1, lon1, lat2, lon2):
     return R * math.sqrt(x * x + y * y)
 
 
+def quat_yaw(q) -> float:
+    return math.atan2(2.0 * (q.w * q.z + q.x * q.y),
+                      1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+
+
+def offset_latlon(lat: float, lon: float, east: float, north: float):
+    """Move a lat/lon by (east, north) meters (small-offset local approximation)."""
+    R = 6371000.0
+    return (lat + math.degrees(north / R),
+            lon + math.degrees(east / (R * math.cos(math.radians(lat)))))
+
+
 class GPSNavigator:
     """Navigator wrapper that uses a raw ActionClient (no BasicNavigator)."""
 
@@ -213,6 +225,10 @@ class GPSNode(Node):
             depth=100,
         )
 
+        # RTK antenna position relative to base_link (FLU, meters)
+        self.lever_fwd = self.declare_parameter('antenna_forward_m', 0.30).value
+        self.lever_left = self.declare_parameter('antenna_left_m', 0.0).value
+
         self.current_lat: Optional[float] = None
         self.current_lon: Optional[float] = None
         
@@ -225,12 +241,15 @@ class GPSNode(Node):
 
         self.publisher_command = self.create_publisher(WebRtcReq, '/webrtc_req', 10)
         self.publisher_completion = self.create_publisher(Empty, 'input_at_waypoint/input',10)
+        self.publisher_corrected_pos = self.create_publisher(Vector3, '/dog_estimate',10)
 
 
         self.queue = []  
         self.current_odom_pos = [0,0]
         self.current_odom_orientation = None
-        self.initial_position = None
+        self.initial_odom_orientation = None
+        self.initial_position = None       # [lon, lat] of base_link at /set_rtk
+        self.initial_odom_pos = None       # /odom_calibrated (x, y) at /set_rtk
 
         self._lock = threading.Lock()
         self._pos_lock = threading.Lock()
@@ -256,11 +275,39 @@ class GPSNode(Node):
             self.current_lon = msg.longitude
 
     def _cb_initial_pos(self,msg: Bool):
-        if msg.data:
-            with self._pos_lock:
-                self.initial_position = [self.current_lon,self.current_lat]
+        if not msg.data:
+            return
 
-            self.get_logger().info("Initial position logged")
+        with self._pos_lock:
+            ant_lat, ant_lon = self.current_lat, self.current_lon
+        with self.odom_lock:
+            q = self.current_odom_orientation
+            odom_xy = list(self.current_odom_pos)
+
+        if ant_lat is None or q is None:
+            self.get_logger().warn(
+                "Cannot set initial position: "
+                + ("no /fix yet" if ant_lat is None else "no /odom_calibrated yet"))
+            return
+
+        # /fix is the antenna. Shift it back to base_link using the ENU heading from
+        # /odom_calibrated:  base = antenna - R(yaw) * [fwd, left]
+        yaw = quat_yaw(q)
+        c, s = math.cos(yaw), math.sin(yaw)
+        east = -(c * self.lever_fwd - s * self.lever_left)
+        north = -(s * self.lever_fwd + c * self.lever_left)
+        base_lat, base_lon = offset_latlon(ant_lat, ant_lon, east, north)
+
+        with self._pos_lock:
+            self.initial_position = [base_lon, base_lat]
+        with self.odom_lock:
+            self.initial_odom_orientation = q
+            self.initial_odom_pos = odom_xy
+
+        self.get_logger().info(
+            f"Initial position logged: base_link lat={base_lat:.8f}, lon={base_lon:.8f} "
+            f"(antenna shifted E={east:+.3f} m, N={north:+.3f} m at yaw "
+            f"{math.degrees(yaw):.1f} deg ENU; odom at ({odom_xy[0]:.2f}, {odom_xy[1]:.2f}))")
 
     def _cb_odom(self,msg: Odometry):
         with self.odom_lock:
@@ -329,26 +376,36 @@ class GPSNode(Node):
         with self.odom_lock:
             ox, oy = self.current_odom_pos
             q = self.current_odom_orientation
+            ox0, oy0 = self.initial_odom_pos if self.initial_odom_pos else (0.0, 0.0)
+        # displacement since /set_rtk (odom_calibrated starts at 0 when that node starts,
+        # which is not necessarily when the initial RTK position was logged)
+        ox -= ox0
+        oy -= oy0
 
         if q is None:
             self.get_logger().warn("No calibrated odom received, cannot estimate target")
             return None
 
-        yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y),
-                         1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+        yaw = quat_yaw(q)
 
         east = ox + math.cos(yaw) * x_base - math.sin(yaw) * y_base
         north = oy + math.sin(yaw) * x_base + math.cos(yaw) * y_base
 
         lon0, lat0 = self.initial_position
-        R = 6371000.0
-        lat = lat0 + math.degrees(north / R)
-        lon = lon0 + math.degrees(east / (R * math.cos(math.radians(lat0))))
+        lat, lon = offset_latlon(lat0, lon0, east, north)
 
         self.get_logger().info(
             f"Target estimate: lat={lat:.8f}, lon={lon:.8f} "
             f"(odom offset E={east:.2f} m, N={north:.2f} m)"
         )
+
+        msg = Vector3()
+        msg.x = lat
+        msg.y = lon
+        msg.z = 0.0
+
+        self.publisher_corrected_pos.publish(msg)
+
         return lat, lon
 
 
@@ -403,6 +460,7 @@ class GPSNode(Node):
         self.get_logger().info('Ready to move')         
 
     def run_task_for(self,pose: PoseStamped):
+
         x = pose.pose.position.x
         y = pose.pose.position.y
         self.get_logger().info(f'Running task at waypoint ({x:.2f}, {y:.2f})')
