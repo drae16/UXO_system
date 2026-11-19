@@ -1015,15 +1015,17 @@ private:
 
     double s_sq_diff = remain_dist*remain_dist - s*s;
     if (s_sq_diff < 0.0) {
-        s_sq_diff = s*s - remain_dist*remain_dist;
-
-       RCLCPP_WARN(get_logger(),
+      RCLCPP_WARN(get_logger(),
         "[VelocityApproach] offset (%.3f) exceeds remaining distance (%.3f); no drive, no turn",
-         s, remain_dist);
+        s, remain_dist);
+      drive_dist = 0.0;
+      return true;
+    }
+    drive_dist = std::sqrt(s_sq_diff);
 
-      ///return true;
-     }
-    drive_dist = 0.8*std::sqrt(s_sq_diff);
+     if (remain_dist > checkpoint_trigger_ && checkpoint_target_ > s) {
+            drive_dist -= std::sqrt(checkpoint_target_*checkpoint_target_ - s*s);
+    }
 
     // Two candidate relative turns; take the smaller-magnitude one.
     double delta_left  = normalize_angle(theta_rel - angle_to_goal);
@@ -1166,6 +1168,7 @@ private:
          }
           x_base_det = xb_verify;
           y_base_det = yb_verify;
+
           RCLCPP_INFO(get_logger(),
             "Sweep hit: odom (%.2f, %.2f), arm_base (%.2f, %.2f)",
             target_x_odom, target_y_odom, x_base_det, y_base_det);
@@ -1184,7 +1187,7 @@ private:
 
   bool run_local_recovery_search(double min_confidence, double &xb_out, double &yb_out)
   {
-    move_arm_to_stow_pose();
+    /// Removed the stowage of arm between target lost and recovery
 
     if (!track_target_once(last_known_x_odom_, last_known_y_odom_)) {
       RCLCPP_WARN(get_logger(), "[LocalRecovery] failed to aim arm at last known position");
@@ -1231,6 +1234,40 @@ private:
       }
     }
     return false;
+  }
+
+  // Aim at the current estimate, detect, and store the result as the new
+  // estimate (odom) and last detection (arm base).
+  bool aim_detect_update(double min_conf, ScanContext &ctx,
+                         const std::shared_ptr<ScanArea::Result> &result)
+  {
+    double xb, yb;
+    if (!track_target_once(ctx.target_x_odom, ctx.target_y_odom) ||
+        !call_detect_target(min_conf, xb, yb)) {
+      return false;
+    }
+    double odom_x, odom_y;
+    if (transform_arm_point_to_odom(xb, yb, odom_x, odom_y)) {
+      ctx.target_x_odom = odom_x; ctx.target_y_odom = odom_y;
+      last_known_x_odom_ = odom_x; last_known_y_odom_ = odom_y;
+    }
+    ctx.x_base_last = xb; ctx.y_base_last = yb;
+    result->x_base = static_cast<float>(xb);
+    result->y_base = static_cast<float>(yb);
+    return true;
+  }
+
+  // After a base move: re-acquire the target, then re-aim at the refined
+  // estimate and detect again so the stored position comes from a centred,
+  // unclipped view. False only if the target is not seen at all.
+  bool refine_target(double min_conf, ScanContext &ctx,
+                     const std::shared_ptr<ScanArea::Result> &result)
+  {
+    if (!aim_detect_update(min_conf, ctx, result)) return false;
+    if (!aim_detect_update(min_conf, ctx, result)) {
+      RCLCPP_WARN(get_logger(), "[Refine] centred re-detect failed; keeping first detection");
+    }
+    return true;
   }
 
   // === Core Scan implementation (FSM dispatch) ==============================
@@ -1342,22 +1379,8 @@ private:
             break;
           }
 
-          double xb, yb;
-          if (track_target_once(ctx.target_x_odom, ctx.target_y_odom) &&
-              call_detect_target(goal->min_confidence, xb, yb)) {
-             double odom_x, odom_y;
-
-             if (transform_arm_point_to_odom(xb, yb, odom_x, odom_y)) {
-              ctx.target_x_odom = odom_x; ctx.target_y_odom = odom_y;
-              last_known_x_odom_ = odom_x; last_known_y_odom_ = odom_y;
-            }
-            ctx.x_base_last = xb; ctx.y_base_last = yb;
-            result->x_base = static_cast<float>(xb);
-            result->y_base = static_cast<float>(yb);
-            state = ScanState::EVALUATE_DISTANCE;
-          } else {
-            state = ScanState::LOCAL_RECOVERY;
-          }
+          state = refine_target(goal->min_confidence, ctx, result)
+                    ? ScanState::EVALUATE_DISTANCE : ScanState::LOCAL_RECOVERY;
           break;
         }
 
@@ -1398,34 +1421,16 @@ private:
             break;
           }
 
-          if (move_dist <= 0.0) {
-             if (target_x_bl < 0.02) {
-               // Already abeam; forward motion can't close range further.
-               drive_straight(target_x_bl);
-             }
-             else {
-
-             }
+          if (move_dist <= 0.0 && std::fabs(target_x_bl) >= 0.02) {
+            // Side pass infeasible: bring the target alongside instead
+            // (forward if ahead, reverse if the robot overshot it).
+            drive_straight(target_x_bl);
           }
 
           rclcpp::sleep_for(1s);   // let the estimator settle before re-aiming
 
-          double xb, yb;
-          if (track_target_once(ctx.target_x_odom, ctx.target_y_odom) &&
-              call_detect_target(goal->min_confidence, xb, yb)) {
-            double odom_x, odom_y;
-            if (transform_arm_point_to_odom(xb, yb, odom_x, odom_y)) {
-              ctx.target_x_odom = odom_x; ctx.target_y_odom = odom_y;
-              last_known_x_odom_ = odom_x; last_known_y_odom_ = odom_y;
-            }
-
-            ctx.x_base_last = xb; ctx.y_base_last = yb;
-            result->x_base = static_cast<float>(xb);
-            result->y_base = static_cast<float>(yb);
-            state = ScanState::EVALUATE_DISTANCE;
-          } else {
-            state = ScanState::LOCAL_RECOVERY;
-          }
+          state = refine_target(goal->min_confidence, ctx, result)
+                    ? ScanState::EVALUATE_DISTANCE : ScanState::LOCAL_RECOVERY;
           break;
         }
 
@@ -1512,6 +1517,8 @@ private:
   const double drive_min_speed_   = 0.20;  // m/s; floor so the Go2 actually steps
   const double drive_ramp_gain_   = 1.0;   // 1/s; speed = gain * remaining distance
   const double drive_stop_lead_s_ = 0.15;  // s of travel cut early for /odom latency + coast
+  const double checkpoint_trigger_ = 0.70;  // partial step only beyond this range
+  const double checkpoint_target_  = 0.60;  // partial step stops with the target here
 
   double rotation_stop_lead_s_{0.10};
 

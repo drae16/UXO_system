@@ -55,7 +55,7 @@ class YoloDetectNode(Node):
         model_path = os.path.join(
         get_package_share_directory("nav_search"),
         "models",
-        "pipe_2048_11_8.onnx"
+        "pipe_2048_11_14.onnx"
         )
         self.model = YOLO(model_path)
 
@@ -170,8 +170,12 @@ class YoloDetectNode(Node):
 
 
     def read_camera(self):
-        ret, frame = self.eo_cam.read()
-        ret, frame = self.eo_cam.read()
+        try:
+            ret, frame = self.eo_cam.read()
+            ret, frame = self.eo_cam.read()
+        except:
+            ret = False
+            self.get_logger().warning("failed to read camera")
 
         if not ret:
             self.camera_reset()
@@ -204,9 +208,16 @@ class YoloDetectNode(Node):
         best_img = None
         best_var = -1.0
         while time.time() < deadline:
-            ret, frame = self.eo_cam.read()
-            ret, frame = self.eo_cam.read()
+
+            try:
+                ret, frame = self.eo_cam.read()
+                ret, frame = self.eo_cam.read()
+            except:
+                ret = False
+                self.get_logger().warning("failed to read camera")
+
             if not ret:
+                self.camera_reset()
                 time.sleep(0.005)
                 continue
             _, blur, var = self.is_blurry(frame, self.BLUR_THRESHOLD)

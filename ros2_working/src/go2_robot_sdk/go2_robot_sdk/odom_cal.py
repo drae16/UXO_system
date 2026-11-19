@@ -75,7 +75,7 @@ class OdomImuCalibration(Node):
         self.offset_alpha = self.declare_parameter('offset_alpha', 0.1).value      # 1.0 = no smoothing
         self.zero_yaw = self.declare_parameter('zero_yaw', False).value
         self.heading_offset = math.radians(
-            self.declare_parameter('heading_offset_deg', -9.0).value)              # added to IMU yaw
+            self.declare_parameter('heading_offset_deg', -7.1).value)              # added to IMU yaw
         self.add_on_set_parameters_callback(self.on_params)
 
         self.odom_sub = self.create_subscription(Odometry, self.odom_topic, self.odom_callback, 50)

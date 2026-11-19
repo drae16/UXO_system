@@ -25,12 +25,12 @@ void Y3SpaceDriver::initialize()
     initDevice();
 
     ROS_INFO_STREAM(this->logger << "Ready\n");
-    m_imuPub = am::Node::node->create_publisher<sensor_msgs::msg::Imu>(m_imu_topic, 100);
-    m_rpyPub = am::Node::node->create_publisher<geometry_msgs::msg::Vector3Stamped>(m_rpy_topic, 100);
+    m_imuPub = am::Node::node->create_publisher<sensor_msgs::msg::Imu>(m_imu_topic, 50);
+    m_rpyPub = am::Node::node->create_publisher<geometry_msgs::msg::Vector3Stamped>(m_rpy_topic, 50);
     //this->m_tempPub = this->m_nh.advertise<std_msgs::msg::Float64>("/imu/temp", 10);
     //this->m_rpyPub = this->m_nh.advertise<geometry_msgs::msg::Vector3Stamped>("/imu/rpy", 10);
 
-    pub_timer_ = am::Node::node->create_wall_timer(am::toDuration(0.001), std::bind(&Y3SpaceDriver::pubTimerCB, this));
+    pub_timer_ = am::Node::node->create_wall_timer(am::toDuration(0.02), std::bind(&Y3SpaceDriver::pubTimerCB, this));
 }
 
 bool Y3SpaceDriver::onConfigure()

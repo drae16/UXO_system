@@ -198,7 +198,7 @@ class ImageProcessor:
 
     def conduct_inference(self, image):
         centers= []
-        results = self.model.predict(image,conf=.5,imgsz=(960,1280))
+        results = self.model.predict(image,conf=.4,imgsz=(1536,2048))
         for result in results:
             result.save(filename=f'{detect_directory}/{datetime.now()}.jpg')
             positions = result.boxes.xywh.numpy() 

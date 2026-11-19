@@ -1084,8 +1084,8 @@ private:
         break;
       }
       if (!get_coverage_here(min_conf, cov)) {
-        RCLCPP_WARN(get_logger(), "[Calibrate] lost target during nudge");
-        return false;
+        RCLCPP_WARN(get_logger(), "[Calibrate] lost target during nudge, assuming current center position values");
+        
       }
       RCLCPP_INFO(get_logger(), "[Calibrate] nudge %d: R=%.3f coverage=%.3f", i + 1, R, cov);
     }
@@ -1188,8 +1188,8 @@ private:
 
     setup_planning_scene();
 
-    if (!initial_calibration(min_conf, 0.25)) {
-      if(!initial_calibration(min_conf,0.30)) {
+    if (!initial_calibration(min_conf, 0.20)) {
+      if(!initial_calibration(min_conf,0.25)) {
         RCLCPP_WARN(get_logger(), "[Calibrate] Failed to complete calibration");
         clear_body();
         clear_planning_scene();

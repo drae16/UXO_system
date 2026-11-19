@@ -64,7 +64,7 @@ class GPSNavigator:
         self._lock = threading.Lock()
 
     def go_to_pose(self, pose: PoseStamped) -> bool:
-        """Send a NavigateToPose goal and wait for result (blocking)."""
+
         goal = NavigateToPose.Goal()
 
         goal.pose = pose
@@ -91,7 +91,7 @@ class GPSNavigator:
         with self._lock:
             self.current_goal_handle = None
 
-        if result and result.status == 4:  # GoalStatus.STATUS_SUCCEEDED
+        if result and result.status == 4:  
             return True
         return False
 
@@ -155,7 +155,7 @@ class GPSNavigator:
                 return None
     
             goal = Reconstruct.Goal()
-            goal.min_confidence = 0.7
+            goal.min_confidence = 0.5
     
             # Send goal
             send_future = self.reconstruct_client.send_goal_async(goal)
@@ -228,12 +228,19 @@ class GPSNode(Node):
         # RTK antenna position relative to base_link (FLU, meters)
         self.lever_fwd = self.declare_parameter('antenna_forward_m', 0.30).value
         self.lever_left = self.declare_parameter('antenna_left_m', 0.0).value
+        # New targets closer than this to any already-accepted target are ignored
+        self.duplicate_threshold = self.declare_parameter('duplicate_threshold_m', 0.60).value
 
         self.current_lat: Optional[float] = None
         self.current_lon: Optional[float] = None
+
+
+        self.current_lat_2: Optional[float] = None
+        self.current_lon_2: Optional[float] = None
         
 
         self.sub_fix = self.create_subscription(NavSatFix, "/fix", self._cb_fix,qos_fix )
+        self.sub_fix_2 = self.create_subscription(NavSatFix, "/fix2", self._cb_fix_2,qos_fix )
         self.sub = self.create_subscription(Vector3, "/gps_targets", self._cb_target, qos)
         self.sub_RTK = self.create_subscription(Bool, "/set_rtk", self._cb_initial_pos, qos_fix)
 
@@ -244,15 +251,22 @@ class GPSNode(Node):
         self.publisher_corrected_pos = self.create_publisher(Vector3, '/dog_estimate',10)
 
 
-        self.queue = []  
+        self.queue = []                # pending targets: (lat, lon, yaw)
+        self.accepted_targets = []     # every target ever queued (lat, lon), in memory only
         self.current_odom_pos = [0,0]
         self.current_odom_orientation = None
         self.initial_odom_orientation = None
+        self.current_odom_time = None
         self.initial_position = None       # [lon, lat] of base_link at /set_rtk
         self.initial_odom_pos = None       # /odom_calibrated (x, y) at /set_rtk
 
+        self.current_odom_time = None          # time.monotonic() of the last /odom_calibrated message
+        self.odom_max_age = 5.0                # s
+        self.odom_wait_timeout = 30.0          # s
+
         self._lock = threading.Lock()
         self._pos_lock = threading.Lock()
+        self._pos_lock_2 = threading.Lock()
         self.odom_lock = threading.Lock()
 
         # Navigator wrapper
@@ -263,9 +277,26 @@ class GPSNode(Node):
         self.worker.start()
 
     def _cb_target(self, msg: Vector3):
+        lat, lon, yaw = msg.x, msg.y, msg.z   # (lat, lon, yaw in radians)
+
         with self._lock:
-            self.queue.append((msg.x, msg.y, msg.z))  # (lat, lon, yaw in radians)
-        self.get_logger().info(f"Queued waypoint: {msg.x}, {msg.y}, {msg.z}")
+            # Proximity filter: compare against every target accepted so far
+            # (still queued or already visited). Ignored targets are not recorded.
+            nearest = min(
+                (gps_distance(lat, lon, a_lat, a_lon) for a_lat, a_lon in self.accepted_targets),
+                default=None,
+            )
+            is_duplicate = nearest is not None and nearest <= self.duplicate_threshold
+            if not is_duplicate:
+                self.accepted_targets.append((lat, lon))
+                self.queue.append((lat, lon, yaw))
+
+        if is_duplicate:
+            self.get_logger().info(
+                f"Ignored target {lat:.8f}, {lon:.8f}, yaw {yaw:.2f}: {nearest:.2f} m from an "
+                f"existing target (threshold {self.duplicate_threshold:.2f} m)")
+        else:
+            self.get_logger().info(f"Queued waypoint: {lat:.8f}, {lon:.8f}, yaw {yaw:.2f}")
 
 
         
@@ -274,12 +305,17 @@ class GPSNode(Node):
             self.current_lat = msg.latitude
             self.current_lon = msg.longitude
 
+    def _cb_fix_2(self, msg: NavSatFix):
+            with self._pos_lock_2:
+                self.current_lat_2 = msg.latitude
+                self.current_lon_2 = msg.longitude
+
     def _cb_initial_pos(self,msg: Bool):
         if not msg.data:
             return
 
-        with self._pos_lock:
-            ant_lat, ant_lon = self.current_lat, self.current_lon
+        with self._pos_lock_2:
+            ant_lat, ant_lon = self.current_lat_2, self.current_lon_2
         with self.odom_lock:
             q = self.current_odom_orientation
             odom_xy = list(self.current_odom_pos)
@@ -287,7 +323,7 @@ class GPSNode(Node):
         if ant_lat is None or q is None:
             self.get_logger().warn(
                 "Cannot set initial position: "
-                + ("no /fix yet" if ant_lat is None else "no /odom_calibrated yet"))
+                + ("no /fix2 yet" if ant_lat is None else "no /odom_calibrated yet"))
             return
 
         # /fix is the antenna. Shift it back to base_link using the ENU heading from
@@ -319,6 +355,8 @@ class GPSNode(Node):
             quat.x,quat.y,quat.z,quat.w = orientation.x,orientation.y,orientation.z,orientation.w
             
             self.current_odom_orientation = quat
+            self.current_odom_time = time.monotonic()
+
 
 
 
@@ -356,6 +394,7 @@ class GPSNode(Node):
             lat, lon, yaw = target
             pose = self._convert_gps(lat, lon, yaw)
             if pose is None:
+                self._requeue(target, "fromLL conversion failed")
                 continue
 
             ok = self.navigator.go_to_pose(pose)
@@ -364,23 +403,54 @@ class GPSNode(Node):
                 self.get_logger().info("Reached goal, running task...")
                 self.run_task_for(pose)
             else:
-                self.get_logger().warn("Navigation failed/canceled")
+                self._requeue(target, "navigation failed/canceled")
 
+    def _requeue(self, target, reason: str):
+        """Put a target back in the queue so it is retried later."""
+        with self._lock:
+            self.queue.append(target)
+            n = len(self.queue)
+        self.get_logger().warn(
+            f"{reason}; target {target[0]:.8f}, {target[1]:.8f} put back in queue ({n} pending)")
+        time.sleep(1.0)   # brief pause so a failing target isn't retried in a tight loop
 
+    def _wait_for_fresh_odom(self) -> bool:
+                deadline = time.monotonic() + self.odom_wait_timeout
+                while rclpy.ok():
+                    with self.odom_lock:
+                        t = self.current_odom_time
+                    age = None if t is None else time.monotonic() - t
+                    if age is not None and age <= self.odom_max_age:
+                        return True
+                    if time.monotonic() > deadline:
+                        self.get_logger().error(
+                            f"No fresh /odom_calibrated (last {'never' if age is None else f'{age:.1f} s ago'}); "
+                            "skipping target estimate")
+                        return False
+                    self.get_logger().warn("Stored odometry is stale, waiting for a new message...",
+                                        throttle_duration_sec=2.0)
+                    time.sleep(0.05)
+                return False
 
     def estimate_target_global(self, x_base: float, y_base: float) -> Optional[tuple]:
         if self.initial_position is None:
             self.get_logger().warn("No initial GPS position stored, cannot estimate target")
             return None
 
+        if not self._wait_for_fresh_odom():
+            self.get_logger().warn("NO FRESH ODOM WAS OBTAINED, DOG ESTIMATION NOT POSSIBLE")
+            return None
+
         with self.odom_lock:
             ox, oy = self.current_odom_pos
             q = self.current_odom_orientation
+            stamp = self.current_odom_time
             ox0, oy0 = self.initial_odom_pos if self.initial_odom_pos else (0.0, 0.0)
-        # displacement since /set_rtk (odom_calibrated starts at 0 when that node starts,
-        # which is not necessarily when the initial RTK position was logged)
+
         ox -= ox0
         oy -= oy0
+
+
 
         if q is None:
             self.get_logger().warn("No calibrated odom received, cannot estimate target")
